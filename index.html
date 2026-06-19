@@ -221,7 +221,7 @@ const USERS = [
 
 
 // ─── FIREBASE REAL-TIME SYNC ──────────────────────────────────────────────────
-const FB_CONFIG = { databaseURL: "https://pickflow6049-default-rtdb.firebaseio.com" };
+const FB_CONFIG = { databaseURL: "https://pickflow-3b80d-default-rtdb.firebaseio.com" };
 let db = null;
 // Initialize Firebase after scripts load
 function initFirebase() {
@@ -1035,43 +1035,9 @@ function showImport() {
           </label>` : ''}
         </div>
         <button class="btn btn-primary" onclick="triggerImport()" style="width:100%">Choose File →</button>
-        <div class="modal-actions" style="justify-content:space-between">
-          <button class="btn btn-sm" onclick="exportBackup()" title="Download a full JSON backup of all current 6049 data">⬇ Export Backup (JSON)</button>
-          <button class="btn" onclick="closeModal()">Cancel</button>
-        </div>
+        <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button></div>
       </div>
     </div>`;
-}
-
-function exportBackup() {
-  try {
-    const pad = n => String(n).padStart(2,'0');
-    const d = new Date();
-    const stamp = d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'_'+pad(d.getHours())+pad(d.getMinutes());
-    const backup = {
-      _app: 'PickFlow6049',
-      _exportedAt: d.toISOString(),
-      _database: (typeof FB_CONFIG!=='undefined' && FB_CONFIG.databaseURL) ? FB_CONFIG.databaseURL : '',
-      tickets: state.tickets || [],
-      archivedTickets: state.archivedTickets || [],
-      inventory: state.inventory || [],
-      rawInventory: state.rawInventory || [],
-      qtyGuide: state.qtyGuide || {},
-      skuNames: state.skuNames || {},
-      capacityRef: state.capacityRef || {},
-      lastImport: state.lastImport || null,
-      ticketCounter: state.ticketCounter || 0
-    };
-    const blob = new Blob([JSON.stringify(backup, null, 2)], { type:'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'PickFlow6049_Backup_'+stamp+'.json';
-    document.body.appendChild(a); a.click();
-    setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
-    showAlert('✓ Backup downloaded ('+(state.rawInventory?state.rawInventory.length:0)+' inventory, '+(state.tickets?state.tickets.length:0)+' tickets).', 'success');
-  } catch(e) {
-    showAlert('Backup failed: '+e.message, 'danger');
-  }
 }
 
 function exportQtyGuide() {
