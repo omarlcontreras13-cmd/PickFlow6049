@@ -67,6 +67,11 @@
   .sku-table td { padding: 8px 10px; border-bottom: 1px solid rgba(46,50,80,0.5); vertical-align: middle; }
   .sku-table tr:last-child td { border-bottom: none; }
   .sku-table tr:hover td { background: rgba(79,110,247,0.05); }
+  .cap-table-wrap { overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 320px);position:relative; }
+  .cap-table { width:100%;border-collapse:collapse;font-size:11px; }
+  .cap-table th { position:sticky;top:0;z-index:2;background:var(--surface);border-bottom:2px solid var(--border);padding:8px 10px;text-align:left;font-size:10px;letter-spacing:1px;color:var(--text2);white-space:nowrap; }
+  .cap-table td { border-bottom:1px solid var(--border);padding:7px 10px;vertical-align:top; }
+  .cap-table tr:hover td { background:rgba(79,110,247,0.03); }
   .loc-tag { display: inline-flex; align-items: center; gap: 6px; background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; font-size: 11px; }
   .loc-empty { color: var(--text2); font-size: 11px; }
   .sku-row-input { display: grid; grid-template-columns: 140px 100px auto; gap: 8px; align-items: center; margin-bottom: 8px; }
@@ -136,6 +141,7 @@
     <span id="ticket-count">0 / 20 TICKETS</span>
     <span id="sync-status" class="sync-indicator sync-pending">⟳ CONNECTING...</span>
     <span id="current-time"></span>
+    <button onclick="goHome()" title="Home" style="padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--accent);cursor:pointer;font-size:14px;line-height:1">🏠</button>
     <button onclick="location.reload(true)" style="padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text2);cursor:pointer;font-family:var(--font);font-size:10px;letter-spacing:1px" title="Force refresh to latest version">↻ REFRESH APP</button>
   </div>
 </div>
@@ -182,6 +188,7 @@
       <button class="btn btn-success" onclick="showNewTicket()" id="new-ticket-btn" disabled>+ New Pick Ticket</button>
       <button class="btn" onclick="showNexusMenu()" id="nexus-btn" style="font-size:11px">📦 Nexus · Receipt / Pick</button>
       <button class="btn" onclick="showDataPreview()" id="preview-btn" disabled style="font-size:11px">🔍 Preview Data</button>
+      <button class="btn" onclick="showInventorySummary()" id="custview-btn" style="font-size:11px;display:none">📦 Customer Inventory View</button>
       <button class="btn" onclick="rebuildHelper()" id="rebuild-btn" style="font-size:11px;display:none">↻ Rebuild Helper</button>
       <button class="btn" onclick="showArchiveSettings()" id="archive-settings-btn" style="font-size:11px;display:none">📁 Archive Settings</button>
       <button class="btn" onclick="showLocationCapacity()" id="capacity-btn" style="font-size:11px;display:none">📦 Location Capacity</button>
@@ -221,7 +228,7 @@ const USERS = [
 
 
 // ─── FIREBASE REAL-TIME SYNC ──────────────────────────────────────────────────
-const FB_CONFIG = { databaseURL: "https://pickflow-3b80d-default-rtdb.firebaseio.com" };
+const FB_CONFIG = { databaseURL: "https://pickflow6049-default-rtdb.firebaseio.com" };
 let db = null;
 // Initialize Firebase after scripts load
 function initFirebase() {
@@ -383,7 +390,7 @@ function listenToFirebase() {
     const data = snap.val();
     if (data && Object.keys(data).length) {
       state.capacityRef = data;
-      if (document.getElementById('cap-floc')) showLocationCapacity();
+      if (document.getElementById('cap-filter-loc')) showLocationCapacity();
     }
   });
 
@@ -430,6 +437,7 @@ function listenToFirebase() {
           const _cy = document.getElementById('cycle-btn'); if(_cy) _cy.style.display='flex';
           const _pa = document.getElementById('putaway-btn'); if(_pa) _pa.style.display='flex';
           const _lp = document.getElementById('lastputaway-btn'); if(_lp) _lp.style.display='flex';
+          const _cv = document.getElementById('custview-btn'); if(_cv) _cv.style.display='flex';
           const ds = document.getElementById('data-status');
           if (ds) ds.innerHTML = '<span class="status-dot"></span>DATA LOADED: ' + state.inventory.length + ' RECORDS';
           if (state.currentUser && !panelBusy()) showDashboard();
@@ -645,6 +653,8 @@ function updateSidebarActions() {
   const lpBtn = document.getElementById('lastputaway-btn');
   if (paBtn) paBtn.style.display = state.dataLoaded ? 'flex' : 'none';
   if (lpBtn) lpBtn.style.display = state.dataLoaded ? 'flex' : 'none';
+  const cvBtn = document.getElementById('custview-btn');
+  if (cvBtn) cvBtn.style.display = state.dataLoaded ? 'flex' : 'none';
 }
 
 // ─── SIDEBAR TABS ─────────────────────────────────────────────────────────────
@@ -1035,9 +1045,43 @@ function showImport() {
           </label>` : ''}
         </div>
         <button class="btn btn-primary" onclick="triggerImport()" style="width:100%">Choose File →</button>
-        <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button></div>
+        <div class="modal-actions" style="justify-content:space-between">
+          <button class="btn btn-sm" onclick="exportBackup()" title="Download a full JSON backup of all current 6049 data">⬇ Export Backup (JSON)</button>
+          <button class="btn" onclick="closeModal()">Cancel</button>
+        </div>
       </div>
     </div>`;
+}
+
+function exportBackup() {
+  try {
+    const pad = n => String(n).padStart(2,'0');
+    const d = new Date();
+    const stamp = d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'_'+pad(d.getHours())+pad(d.getMinutes());
+    const backup = {
+      _app: 'PickFlow6049',
+      _exportedAt: d.toISOString(),
+      _database: (typeof FB_CONFIG!=='undefined' && FB_CONFIG.databaseURL) ? FB_CONFIG.databaseURL : '',
+      tickets: state.tickets || [],
+      archivedTickets: state.archivedTickets || [],
+      inventory: state.inventory || [],
+      rawInventory: state.rawInventory || [],
+      qtyGuide: state.qtyGuide || {},
+      skuNames: state.skuNames || {},
+      capacityRef: state.capacityRef || {},
+      lastImport: state.lastImport || null,
+      ticketCounter: state.ticketCounter || 0
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type:'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'PickFlow6049_Backup_'+stamp+'.json';
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
+    showAlert('✓ Backup downloaded ('+(state.rawInventory?state.rawInventory.length:0)+' inventory, '+(state.tickets?state.tickets.length:0)+' tickets).', 'success');
+  } catch(e) {
+    showAlert('Backup failed: '+e.message, 'danger');
+  }
 }
 
 function exportQtyGuide() {
@@ -1600,7 +1644,7 @@ function processImport(wb) {
     if (!loaded) { showAlert('No valid location/capacity rows found.','warning'); return; }
     if (!db) { showAlert('No database connection.','danger'); return; }
     db.ref('capacityRef').set(state.capacityRef)
-      .then(()=>{ showAlert('✓ Capacity reference loaded — '+loaded+' locations.','success'); if(document.getElementById('cap-floc')) showLocationCapacity(); })
+      .then(()=>{ showAlert('✓ Capacity reference loaded — '+loaded+' locations.','success'); if(document.getElementById('cap-filter-loc')) showLocationCapacity(); })
       .catch(e=>showAlert('Error: '+e.message,'danger'));
     return;
   }
@@ -4838,98 +4882,305 @@ function lpaToggleAll(expand) {
   });
 }
 
-// ─── LOCATION CAPACITY (6049) — reads the imported Location Capacity Reference ──
+// ─── LOCATION CAPACITY (6049) — ported from Capacity·CycleCount app (v27) ──────
 function showLocationCapacity() {
   state.currentView = 'capacity';
-  const panel = document.getElementById('main-panel');
-  const ref = state.capacityRef || {};
-  const refLocs = Object.keys(ref);
-  if (!refLocs.length) {
-    panel.innerHTML = '<div class="panel-inner" style="padding:20px">'
-      + '<div style="font-size:14px;font-weight:bold;letter-spacing:2px;margin-bottom:12px">📦 LOCATION CAPACITY</div>'
-      + '<div class="alert alert-info">No capacity reference loaded yet. Use <strong>Import Data File → Location Capacity Reference</strong> (Col F: Location, Col H: Max Pallets) to load it.</div></div>';
-    return;
+  const locMap = {};
+  // Seed all capacity-ref locations first (ensures empty locations show)
+  Object.keys(state.capacityRef).forEach(loc => {
+    locMap[loc] = { location:loc, utl:0, skus:[], maxCap:state.capacityRef[loc]||0 };
+  });
+  // Fill from rawInventory — pallets = pcs / qtyGuide[sku]
+  state.rawInventory.forEach(r => {
+    if (!r.location) return;
+    if (!locMap[r.location]) locMap[r.location] = { location:r.location, utl:0, skus:[], maxCap:state.capacityRef[r.location]||0 };
+    const pq = state.qtyGuide[r.sku];
+    const pal = pq ? (r.pcs||0)/pq : 0;
+    locMap[r.location].utl += pal;
+    let sk = locMap[r.location].skus.find(s=>s.sku===r.sku);
+    if (!sk) { sk={sku:r.sku,pal:0,pcs:0,expDates:[]}; locMap[r.location].skus.push(sk); }
+    sk.pal += pal;
+    sk.pcs += r.pcs||0;
+    if (r.expDate) sk.expDates.push(new Date(r.expDate));
+  });
+
+  const locs = Object.values(locMap);
+  const hasRef = Object.keys(state.capacityRef).length > 0;
+  const totMaxCap = locs.reduce((s,l)=>s+(l.maxCap||0),0);
+  const totUtl = locs.reduce((s,l)=>s+l.utl,0);
+  const totAvail = Math.max(0,totMaxCap-totUtl);
+  const pctCap = totMaxCap>0 ? Math.round(totUtl/totMaxCap*100) : null;
+
+  const fi = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%';
+
+  let html = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+    <div style="font-size:13px;font-weight:bold;letter-spacing:2px;color:var(--text)">📦 LOCATION CAPACITY</div>
+    <div style="display:flex;gap:8px">
+      ${!hasRef?'<span style="font-size:11px;color:var(--warning);padding:4px 10px;background:rgba(251,191,36,0.1);border-radius:4px;border:1px solid rgba(251,191,36,0.3)">⚠ Import Capacity Reference for Max Cap data</span>':''}
+      <button class="btn btn-sm" onclick="exportCapacityExcel()">⬇ Export Excel</button>
+    </div>
+  </div>`;
+
+  if (hasRef) {
+    const pctColor = pctCap>=90?'#e74c3c':pctCap>=70?'#e67e22':pctCap>=50?'#f1c40f':'#27ae60';
+    html += `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 20px;margin-bottom:20px;display:grid;grid-template-columns:repeat(6,1fr);gap:8px;text-align:center">
+      <div><div style="font-size:9px;color:var(--text2);letter-spacing:1px;margin-bottom:4px">TOTAL LOCATIONS</div><div style="font-size:24px;font-weight:bold;color:var(--text)">${locs.length.toLocaleString()}</div></div>
+      <div><div style="font-size:9px;color:var(--text2);letter-spacing:1px;margin-bottom:4px">TOT PALLETS</div><div style="font-size:24px;font-weight:bold;color:var(--accent)">${Math.round(totUtl).toLocaleString()}</div></div>
+      <div><div style="font-size:9px;color:var(--text2);letter-spacing:1px;margin-bottom:4px">TOT MAX CAP</div><div style="font-size:24px;font-weight:bold;color:var(--text)">${Math.round(totMaxCap).toLocaleString()}</div></div>
+      <div><div style="font-size:9px;color:var(--text2);letter-spacing:1px;margin-bottom:4px">TOT UTILIZ CAP</div><div style="font-size:24px;font-weight:bold;color:var(--warning)">${Math.round(totUtl).toLocaleString()}</div></div>
+      <div><div style="font-size:9px;color:var(--text2);letter-spacing:1px;margin-bottom:4px">TOT AVAIL CAP</div><div style="font-size:24px;font-weight:bold;color:var(--accent2)">${Math.round(totAvail).toLocaleString()}</div></div>
+      <div><div style="font-size:9px;color:var(--text2);letter-spacing:1px;margin-bottom:4px">% OF CAP</div><div style="font-size:24px;font-weight:bold;color:${pctColor}">${pctCap}%</div></div>
+    </div>`;
+  } else {
+    html += `<div class="stats-grid" style="margin-bottom:20px">
+      <div class="stat-card"><div class="stat-label">LOCATIONS</div><div class="stat-value">${locs.length}</div></div>
+      <div class="stat-card"><div class="stat-label">TOTAL PALLETS</div><div class="stat-value yellow">${Math.round(totUtl)}</div></div>
+      <div class="stat-card"><div class="stat-label">INVENTORY RECORDS</div><div class="stat-value green">${state.rawInventory.length.toLocaleString()}</div></div>
+    </div>`;
   }
-  // Current pallets per location = count of physical inventory rows (each row = 1 skid/pallet)
-  const src = (state.rawInventory && state.rawInventory.length) ? state.rawInventory : (state.inventory||[]);
-  const usedByLoc = {}, custByLoc = {};
-  src.forEach(r => {
-    const loc = (r.location||'').trim();
-    if (!loc) return;
-    usedByLoc[loc] = (usedByLoc[loc]||0) + 1;
-    if (!custByLoc[loc]) custByLoc[loc] = new Set();
-    if (r.customer) custByLoc[loc].add(r.customer);
-  });
-  // Build a row per reference location (plus any occupied location missing from the ref)
-  const allLocs = new Set(refLocs);
-  Object.keys(usedByLoc).forEach(l => { if (ref[l] !== undefined) allLocs.add(l); });
-  const rows = [...allLocs].map(loc => {
-    const max  = ref[loc] || 0;
-    const used = usedByLoc[loc] || 0;
-    const open = Math.max(0, max - used);
-    const pct  = max > 0 ? Math.round(used/max*100) : (used>0?999:0);
-    const cust = custByLoc[loc] ? [...custByLoc[loc]].sort().join(', ') : '';
-    let status = 'EMPTY';
-    if (used > max) status = 'OVER';
-    else if (max>0 && used === max) status = 'FULL';
-    else if (used > 0) status = 'IN USE';
-    return { loc, max, used, open, pct, cust, status };
-  }).sort((a,b)=> b.pct - a.pct || a.loc.localeCompare(b.loc));
 
-  const totMax  = rows.reduce((s,r)=>s+r.max,0);
-  const totUsed = rows.reduce((s,r)=>s+r.used,0);
-  const overall = totMax>0 ? Math.round(totUsed/totMax*100) : 0;
-  const overCnt = rows.filter(r=>r.status==='OVER').length;
-  const fullCnt = rows.filter(r=>r.status==='FULL').length;
-  const emptyCnt= rows.filter(r=>r.status==='EMPTY').length;
-  const ovColor = overall>=100?'var(--danger)':overall>=85?'var(--warning)':'var(--accent2)';
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-bottom:12px;align-items:flex-end">
+    <div class="form-group" style="margin:0"><label>FILTER LOCATION</label><input type="text" id="cap-filter-loc" placeholder="Location..." oninput="renderCapTable()" style="${fi}"></div>
+    <div class="form-group" style="margin:0"><label>FILTER SKU</label><input type="text" id="cap-filter-sku" placeholder="SKU..." oninput="renderCapTable()" style="${fi}"></div>
+    <button class="btn btn-sm" onclick="document.getElementById('cap-filter-loc').value='';document.getElementById('cap-filter-sku').value='';renderCapTable()">✕ Clear</button>
+  </div>
+  <div id="cap-table-wrap"></div>`;
 
-  const cards = [
-    {l:'LOCATIONS', v:rows.length, c:'var(--text)'},
-    {l:'TOTAL CAPACITY', v:totMax.toLocaleString(), c:'var(--accent)'},
-    {l:'PALLETS USED', v:totUsed.toLocaleString(), c:'var(--accent2)'},
-    {l:'UTILIZATION', v:overall+'%', c:ovColor},
-    {l:'OVER CAPACITY', v:overCnt, c:overCnt>0?'var(--danger)':'var(--accent2)'},
-    {l:'EMPTY', v:emptyCnt, c:'var(--text2)'}
-  ].map(c=>'<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center">'
-    +'<div style="font-size:9px;color:'+c.c+';letter-spacing:1px;font-weight:bold;margin-bottom:4px">'+c.l+'</div>'
-    +'<div style="font-size:20px;font-weight:bold;color:'+c.c+'">'+c.v+'</div></div>').join('');
-
-  const fi='background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:7px 12px;color:var(--text);font-family:var(--font);font-size:12px;outline:none;width:220px';
-  let h = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">'
-    + '<div style="font-size:14px;font-weight:bold;letter-spacing:2px">📦 LOCATION CAPACITY</div>'
-    + '<input type="text" id="cap-floc" placeholder="Filter location or customer..." oninput="filterCapRows()" style="'+fi+'"></div>'
-    + '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:16px">'+cards+'</div>'
-    + '<div style="overflow-x:auto"><table class="sku-table" style="font-size:11px;margin:0"><thead><tr>'
-    + '<th style="text-align:left">LOCATION</th><th style="text-align:left">CUSTOMER</th>'
-    + '<th style="text-align:right">USED</th><th style="text-align:right">MAX</th><th style="text-align:right">OPEN</th>'
-    + '<th style="text-align:left">UTILIZATION</th><th style="text-align:center">STATUS</th></tr></thead><tbody id="cap-tbody">';
-
-  rows.forEach(r => {
-    const barPct = Math.min(100, r.pct===999?100:r.pct);
-    const barColor = r.status==='OVER'?'var(--danger)':r.pct>=85?'var(--warning)':'var(--accent2)';
-    const stColor  = r.status==='OVER'?'var(--danger)':r.status==='FULL'?'var(--warning)':r.status==='EMPTY'?'var(--text2)':'var(--accent2)';
-    const pctTxt   = r.pct===999?'OVER':r.pct+'%';
-    h += '<tr class="cap-row" data-find="'+(r.loc+' '+r.cust).toLowerCase().replace(/"/g,'')+'">'
-      + '<td style="font-weight:bold;color:var(--accent)">'+r.loc+'</td>'
-      + '<td style="font-size:10px;color:var(--text2)">'+r.cust+'</td>'
-      + '<td style="text-align:right">'+r.used+'</td>'
-      + '<td style="text-align:right">'+r.max+'</td>'
-      + '<td style="text-align:right;color:'+(r.open===0?'var(--warning)':'var(--text2)')+'">'+r.open+'</td>'
-      + '<td><div style="display:flex;align-items:center;gap:8px"><div style="flex:1;min-width:80px;background:var(--border);border-radius:4px;height:8px;overflow:hidden">'
-      + '<div style="width:'+barPct+'%;background:'+barColor+';height:100%"></div></div>'
-      + '<span style="font-size:10px;font-weight:bold;color:'+barColor+';min-width:38px;text-align:right">'+pctTxt+'</span></div></td>'
-      + '<td style="text-align:center"><span style="font-size:10px;font-weight:bold;padding:2px 8px;border-radius:10px;background:'+stColor+'1f;color:'+stColor+'">'+r.status+'</span></td></tr>';
-  });
-  h += '</tbody></table></div>';
-  panel.innerHTML = '<div class="panel-inner" style="padding:20px">'+h+'</div>';
+  document.getElementById('main-panel').innerHTML = html;
+  window._capLocMap = locMap;
+  window._capHasRef = hasRef;
+  renderCapTable();
 }
-function filterCapRows() {
-  const q = (document.getElementById('cap-floc')||{}).value||'';
-  const ql = q.trim().toLowerCase();
-  document.querySelectorAll('#cap-tbody .cap-row').forEach(tr => {
-    tr.style.display = (!ql || (tr.getAttribute('data-find')||'').includes(ql)) ? '' : 'none';
+
+function utlColor(pct) {
+  if (pct>=100) return '#e03e3e';
+  if (pct>=90)  return '#e03e3e';
+  if (pct>=70)  return '#d97706';
+  if (pct>=50)  return '#d97706';
+  if (pct>=25)  return '#1a9e7a';
+  if (pct>0)    return '#1a9e7a';
+  return '#d0d7e8';
+}
+
+function renderCapTable() {
+  const locMap = window._capLocMap||{};
+  const hasRef = window._capHasRef;
+  const locF = (document.getElementById('cap-filter-loc')||{}).value||'';
+  const skuF = (document.getElementById('cap-filter-sku')||{}).value||'';
+  let locs = Object.values(locMap).sort((a,b)=>a.location.localeCompare(b.location));
+  if (locF) locs = locs.filter(l=>l.location.toLowerCase().includes(locF.toLowerCase()));
+  if (skuF) locs = locs.filter(l=>l.skus.some(s=>s.sku.toLowerCase().includes(skuF.toLowerCase())));
+
+  if (!locs.length) { document.getElementById('cap-table-wrap').innerHTML='<div style="padding:20px;text-align:center;color:var(--text2)">No locations match filters.</div>'; return; }
+
+  const sth = 'position:sticky;top:0;z-index:2;background:var(--surface);border-bottom:2px solid var(--border);padding:8px 10px;font-size:10px;letter-spacing:1px;color:var(--text2);white-space:nowrap;';
+  let t = `<div class="cap-table-wrap"><table class="cap-table"><thead><tr>
+    <th style="${sth}">LOCATION</th>`;
+  if (hasRef) t += `<th style="${sth}text-align:right">MAX CAP</th><th style="${sth}text-align:right">UTL</th><th style="${sth}text-align:right">AVAIL CAP</th><th style="${sth}text-align:center;min-width:80px">% OF UTL</th>`;
+  else t += `<th style="${sth}text-align:right">UTL PALLETS</th>`;
+  t += `<th style="${sth}">SKU</th><th style="${sth}text-align:right">PAL</th><th style="${sth}text-align:right">PCS</th><th style="${sth}">PROD ID</th><th style="${sth}">EXP DATES</th></tr></thead><tbody>`;
+
+  locs.forEach(loc => {
+    const utl = Math.round(loc.utl*10)/10;
+    const maxCap = loc.maxCap||0;
+    const avail = Math.max(0, maxCap-utl);
+    const pct = maxCap>0 ? Math.round(utl/maxCap*100) : null;
+    const pctColor = pct!==null ? utlColor(pct) : 'var(--text2)';
+    const pctBg = pct!==null ? pctColor+'22' : '';
+    const skus = [...loc.skus].sort((a,b)=>b.pal-a.pal);
+
+    if (skus.length===0) {
+      t += `<tr>
+        <td style="font-weight:bold;color:var(--accent)">${loc.location}</td>
+        ${hasRef?`<td style="text-align:right">${maxCap}</td><td style="text-align:right">0</td><td style="text-align:right;color:var(--accent2)">${maxCap}</td><td style="text-align:center;background:${pctBg}"><span style="color:${pctColor};font-weight:bold;font-size:15px">0%</span></td>`:`<td style="text-align:right">0</td>`}
+        <td colspan="5" style="color:var(--text2);font-style:italic">Empty</td>
+      </tr>`;
+      return;
+    }
+
+    skus.forEach((s,si) => {
+      const expStr = [...new Set(s.expDates.map(d=>d.toLocaleDateString()))].sort().slice(0,3).join('  ');
+      const name = state.skuNames[s.sku]||'';
+      const palStr = Math.round(s.pal*10)/10;
+      t += `<tr>
+        ${si===0?`<td rowspan="${skus.length}" style="font-weight:bold;color:var(--accent);vertical-align:top">${loc.location}</td>`:''}
+        ${si===0&&hasRef?`<td rowspan="${skus.length}" style="text-align:right;vertical-align:top">${maxCap}</td><td rowspan="${skus.length}" style="text-align:right;font-weight:bold;vertical-align:top">${utl}</td><td rowspan="${skus.length}" style="text-align:right;color:var(--accent2);font-weight:bold;vertical-align:top">${Math.round(avail)}</td><td rowspan="${skus.length}" style="text-align:center;background:${pctBg};vertical-align:middle;padding:10px"><span style="color:${pctColor};font-weight:bold;font-size:16px">${pct!==null?pct+'%':'—'}</span></td>`:si===0&&!hasRef?`<td rowspan="${skus.length}" style="text-align:right;font-weight:bold;vertical-align:top">${utl}</td>`:''}
+        <td style="color:var(--accent);font-weight:bold">${s.sku}</td>
+        <td style="text-align:right;color:var(--accent2);font-weight:bold">${palStr}</td>
+        <td style="text-align:right;color:var(--text2)">${Math.round(s.pcs||0).toLocaleString()}</td>
+        <td style="font-size:10px;color:var(--text2)">${name}</td>
+        <td style="font-size:10px;color:var(--text2)">${expStr}</td>
+      </tr>`;
+    });
   });
+
+  t += `</tbody></table></div><div style="font-size:11px;color:var(--text2);margin-top:8px;text-align:right">${locs.length} locations shown</div>`;
+  document.getElementById('cap-table-wrap').innerHTML = t;
+}
+
+function exportCapacityExcel() {
+  const locMap = window._capLocMap||{};
+  const hasRef = window._capHasRef;
+  const locs = Object.values(locMap).sort((a,b)=>a.location.localeCompare(b.location));
+  const totMaxCap = locs.reduce((s,l)=>s+(l.maxCap||0),0);
+  const totUtl = locs.reduce((s,l)=>s+l.utl,0);
+  const pctCap = totMaxCap>0?Math.round(totUtl/totMaxCap*100):null;
+  const wb = XLSX.utils.book_new();
+  const summary = [['','','Tot_Plts'],['','',Math.round(totUtl)],[],
+    ['Tot_Max_Cap','Tot_Utiliz_Cap','Tot_Avail_Cap','% Of_Cap'],
+    [Math.round(totMaxCap),Math.round(totUtl),Math.round(Math.max(0,totMaxCap-totUtl)),pctCap!==null?pctCap/100:null],[],
+    hasRef?['Location_name','Max Cap','Utl','Avail Cap','% of Utl','SKU','Prod ID','Exp Dates','SKU Breakdown']:['Location_name','Utl','SKU','Prod ID','Exp Dates']];
+  locs.forEach(loc => {
+    const utl = Math.round(loc.utl*10)/10;
+    const maxCap = loc.maxCap||0;
+    const avail = Math.max(0,maxCap-utl);
+    const pct = maxCap>0?utl/maxCap:null;
+    const skus = [...loc.skus].sort((a,b)=>b.pal-a.pal);
+    const breakdown = skus.length>1?skus.map(s=>s.sku+':'+Math.round(s.pal*10)/10).join(', '):'';
+    if (skus.length===0) {
+      summary.push(hasRef?[loc.location,maxCap,0,maxCap,0,'','','','']:[loc.location,0,'','','']);
+    } else {
+      skus.forEach((s,si) => {
+        const expStr = [...new Set(s.expDates.map(d=>d.toLocaleDateString()))].sort().slice(0,3).join(', ');
+        const name = state.skuNames[s.sku]||'';
+        summary.push(hasRef?[si===0?loc.location:'',si===0?maxCap:'',si===0?utl:'',si===0?Math.round(avail):'',si===0?pct:'',s.sku,name,expStr,si===0?breakdown:'']:[si===0?loc.location:'',si===0?utl:'',s.sku,name,expStr]);
+      });
+    }
+  });
+  const ws = XLSX.utils.aoa_to_sheet(summary);
+  if (hasRef) ws['!cols']=[{wch:20},{wch:10},{wch:10},{wch:12},{wch:10},{wch:12},{wch:28},{wch:28},{wch:30}];
+  else ws['!cols']=[{wch:20},{wch:10},{wch:12},{wch:28},{wch:28}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Location Capacity');
+  XLSX.writeFile(wb,'LocationCapacity_6049_'+new Date().toISOString().slice(0,10)+'.xlsx');
+  showAlert('✓ Exported.','success');
+}
+
+
+// ═══ CUSTOMER INVENTORY VIEW — PALLETS / PCS BY CUSTOMER (ported from 6021) ═══
+function showInventorySummary() {
+  // Source full set so all statuses (picked/ghost/cycle/damaged) are represented,
+  // not the picking-filtered state.inventory subset.
+  const inv = (state.rawInventory && state.rawInventory.length) ? state.rawInventory : state.inventory;
+  if (!inv || !inv.length) { showAlert('No inventory loaded.','warning'); return; }
+  state.currentView = 'invsummary';
+
+  const getStatus = r => {
+    if ((r.pcsPending||0) > 0) return 'PICKED';
+    const loc = (r.location||'').toUpperCase();
+    const st  = (r.status||'').toUpperCase();
+    if (loc.includes('22-GHOST') || st === 'GHOST') return 'GHOST';
+    if (st === 'DAMAGED' || loc.includes('22-REWORK')) return 'DAMAGED';
+    if (loc.includes('CYC_CNT') || loc.includes('CYC-CNT') || loc.includes('22-CYCLE') || st === 'CYCLE COUNT') return 'CYCLE COUNT';
+    return 'AVAILABLE';
+  };
+
+  const statuses = ['AVAILABLE','PICKED','DAMAGED','CYCLE COUNT','GHOST'];
+  const allCols = [...statuses, 'TOTAL'];
+  const statusColors = {
+    'AVAILABLE':'var(--accent2)', 'PICKED':'var(--warning)',
+    'DAMAGED':'var(--danger)', 'CYCLE COUNT':'var(--accent)',
+    'GHOST':'var(--text2)', 'TOTAL':'var(--text)'
+  };
+
+  const customers = [...new Set(inv.map(r=>r.customer||'UNKNOWN'))].sort();
+  const emptyBucket = () => ({pallets:0, pcs:0});
+  // Pallets = skid count (each inventory record = one skid/pallet position).
+  const addTo = (b, r) => { b.pallets += 1; b.pcs += (r.pcs||0); };
+
+  const map = {};
+  customers.forEach(c => { map[c] = {}; allCols.forEach(s => map[c][s] = emptyBucket()); });
+
+  inv.forEach(r => {
+    const c = r.customer||'UNKNOWN';
+    const s = getStatus(r);
+    if (!map[c]) return;
+    addTo(map[c][s], r); addTo(map[c]['TOTAL'], r);
+  });
+
+  const grand = {}; allCols.forEach(s => grand[s] = emptyBucket());
+  inv.forEach(r => { const s=getStatus(r); addTo(grand[s],r); addTo(grand['TOTAL'],r); });
+
+  // Headline = pallets (positions), subscript = pcs.
+  const cell = (d, isTotal=false, color='') => {
+    if (!d||(!d.pallets&&!d.pcs)) return `<td style="text-align:right;color:var(--text2);opacity:0.35;${isTotal?'font-weight:bold;border-left:2px solid var(--border)':''}">${isTotal?'0':'—'}</td>`;
+    return `<td style="text-align:right;font-weight:${isTotal?'bold':'normal'};color:${color||statusColors['AVAILABLE']};${isTotal?'border-left:2px solid var(--border)':''}">
+      <div style="font-weight:bold;font-size:${isTotal?'14px':'inherit'}">${Math.round(d.pallets).toLocaleString()}</div>
+      <div style="font-size:9px;color:var(--text2)">${d.pcs.toLocaleString()} pcs</div>
+    </td>`;
+  };
+
+  // Inventory Accuracy (by pallet count): (Total - Cycle Count - Ghost) / Total.
+  const accPct = (m) => {
+    const tot = (m && m['TOTAL'] && m['TOTAL'].pallets) || 0;
+    if (!tot) return null;
+    const off = ((m['CYCLE COUNT']&&m['CYCLE COUNT'].pallets)||0) + ((m['GHOST']&&m['GHOST'].pallets)||0);
+    return (tot - off) / tot * 100;
+  };
+  const accColor = (a) => a>=98 ? 'var(--accent2)' : (a>=95 ? 'var(--warning)' : 'var(--danger)');
+  const accCell = (m, big=false) => {
+    const a = accPct(m);
+    if (a===null) return '<td style="text-align:right;color:var(--text2);opacity:0.35">—</td>';
+    return '<td style="text-align:right;font-weight:bold;color:'+accColor(a)+';font-size:'+(big?'14px':'inherit')+'">'+a.toFixed(1)+'%</td>';
+  };
+  const grandAcc = accPct(grand);
+  const grandOff = ((grand['CYCLE COUNT']&&grand['CYCLE COUNT'].pallets)||0) + ((grand['GHOST']&&grand['GHOST'].pallets)||0);
+  const grandTotPal = (grand['TOTAL']&&grand['TOTAL'].pallets)||0;
+
+  let rows = '';
+  customers.forEach((c,i) => {
+    rows += `
+    <tr style="background:${i%2!==0?'var(--surface)':''}">
+      <td style="font-weight:bold">${c}</td>
+      ${accCell(map[c])}
+      ${allCols.map(s=>cell(map[c][s], s==='TOTAL', statusColors[s])).join('')}
+    </tr>`;
+  });
+
+  let h = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+    <div>
+      <div style="font-size:14px;font-weight:bold;letter-spacing:2px">📦 INVENTORY SUMMARY — PALLETS BY CUSTOMER</div>
+      <div style="font-size:11px;color:var(--text2);margin-top:2px">Last import: ${state.lastImport?new Date(state.lastImport).toLocaleString():'—'}</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:20px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;text-align:center" title="Inventory Accuracy = (Total - Cycle Count - Ghost) / Total, by pallet count">
+      <div style="font-size:9px;color:var(--accent);letter-spacing:1px;font-weight:bold;margin-bottom:4px">INV ACCURACY</div>
+      <div style="font-size:20px;font-weight:bold;color:${grandAcc!=null?accColor(grandAcc):'var(--text2)'}">${grandAcc!=null?grandAcc.toFixed(1)+'%':'—'}</div>
+      <div style="font-size:10px;color:var(--text2)">${Math.round(grandOff).toLocaleString()} of ${Math.round(grandTotPal).toLocaleString()} off</div>
+    </div>
+    ${allCols.map(s=>`
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;text-align:center">
+        <div style="font-size:9px;color:${statusColors[s]};letter-spacing:1px;font-weight:bold;margin-bottom:4px">${s}</div>
+        <div style="font-size:20px;font-weight:bold;color:${statusColors[s]}">${Math.round(grand[s]?.pallets||0).toLocaleString()}</div>
+        <div style="font-size:10px;color:var(--text2)">${(grand[s]?.pcs||0).toLocaleString()} pcs</div>
+      </div>`).join('')}
+  </div>
+
+  <div style="overflow-x:auto">
+  <table class="sku-table" id="inv-summary-table">
+    <thead>
+      <tr>
+        <th style="text-align:left;min-width:200px">CUSTOMER</th>
+        <th style="text-align:right;color:var(--accent)">ACCURACY</th>
+        ${allCols.map(s=>`<th style="text-align:right;color:${statusColors[s]}">${s}</th>`).join('')}
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
+    <tfoot>
+      <tr style="background:var(--surface2);border-top:3px solid var(--border)">
+        <td style="font-weight:bold;font-size:16px;letter-spacing:1px">GRAND TOTAL</td>
+        ${accCell(grand, true)}
+        ${allCols.map(s=>`<td style="text-align:right;font-weight:bold;color:${statusColors[s]}">
+          <div style="font-size:20px;font-weight:bold">${Math.round(grand[s]?.pallets||0).toLocaleString()}</div>
+          <div style="font-size:10px;color:var(--text2)">${(grand[s]?.pcs||0).toLocaleString()} pcs</div>
+        </td>`).join('')}
+      </tr>
+    </tfoot>
+  </table>
+  </div>`;
+
+  document.getElementById('main-panel').innerHTML = '<div class="panel-inner" style="padding:20px">'+h+'</div>';
 }
 
 
