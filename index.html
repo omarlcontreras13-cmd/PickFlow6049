@@ -2779,6 +2779,28 @@ function saveCycleCount() {
   // Word export not available in PickFlow — session saved to Firebase
   showCCReport(session);
 }
+// ─── CYCLE COUNT — MONTHLY AUDIT VIEW + ARCHIVE HELPERS ───────────────────────
+function ccMonthKey(ts) { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0'); }
+function ccMonthLabel(key) { const p = key.split('-'); return new Date(+p[0], +p[1]-1, 1).toLocaleDateString('en-US',{month:'long',year:'numeric'}); }
+function loadCCMonth(monthKey) { renderCCMonthList(monthKey); }
+function renderCCMonthList(monthKey) {
+  const el = document.getElementById('cc-month-list'); if (!el) return;
+  const lbl = document.getElementById('cc-month-label');
+  const isArchived = monthKey !== window._ccCurMonthKey;
+  const list = ((window._ccSessionsByMonth||{})[monthKey] || []).slice().sort((a,b)=>b.createdAt-a.createdAt);
+  if (lbl) lbl.textContent = ccMonthLabel(monthKey) + ' (' + list.length + ')';
+  if (!list.length) { el.innerHTML = '<div style="font-size:12px;color:var(--text2)">No counts this month.</div>'; return; }
+  el.innerHTML = list.map(s=>`
+    <div style="padding:9px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:4px">
+        <span style="font-weight:bold;color:var(--accent);cursor:pointer" onclick="viewCCSession('${s.id}')">${s.id}</span>
+        ${(!isArchived && isAdmin())?`<button onclick="confirmDeleteSession('${s.id}')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:0">✕</button>`:(isArchived?`<span style="font-size:9px;color:var(--text2);letter-spacing:1px">ARCHIVED</span>`:'')}
+      </div>
+      <div style="color:var(--text2);font-size:11px;cursor:pointer" onclick="viewCCSession('${s.id}')">${new Date(s.createdAt).toLocaleString()} · ${s.countedBy}</div>
+      <div style="color:var(--text2);font-size:11px">${(s.locations||[]).length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted</span>`:''}</div>
+    </div>`).join('');
+}
+
 function showCycleCountStart() {
   state.currentView = 'cyclecount';
   const SKIP_LOCS = ['22-TR','22-RR','22-CYCLE','22-REWORK','22-GHOST','22-GENERAL','CYC_CNT'];
@@ -2790,13 +2812,29 @@ function showCycleCountStart() {
     return;
   }
 
-  // Load ALL location sources in parallel: sessions history + custom location list
+  // Load ALL location sources in parallel: live sessions + custom location list + monthly archive
   Promise.all([
     db.ref('cycleCount6049').orderByChild('createdAt').once('value'),
-    db.ref('locationList6049').once('value')
-  ]).then(([sessionSnap, locSnap]) => {
-    const data     = sessionSnap.val() || {};
-    const sessions = Object.values(data).sort((a,b)=>b.createdAt-a.createdAt);
+    db.ref('locationList6049').once('value'),
+    db.ref('cycleCountArchive6049').once('value')
+  ]).then(([sessionSnap, locSnap, archiveSnap]) => {
+    const data        = sessionSnap.val() || {};            // live (current-month) sessions
+    const archiveData = archiveSnap.val() || {};            // { 'YYYY-MM': { id: session } }
+    window._ccArchiveData = archiveData;
+    // Flatten archived sessions and RECOMBINE with live so all coverage / last-counted / suggested
+    // logic below sees the full history exactly as before (archiving only changes where rows live).
+    const archivedSessions = [];
+    Object.keys(archiveData).forEach(mk => Object.values(archiveData[mk]||{}).forEach(s => archivedSessions.push(s)));
+    const sessions = [...Object.values(data), ...archivedSessions].sort((a,b)=>b.createdAt-a.createdAt);
+    // Group every session by month for the audit panel + dropdown (in-memory; no per-month reads).
+    const ccCurKey = ccMonthKey(Date.now());
+    window._ccCurMonthKey = ccCurKey;
+    window._ccSessionsByMonth = {};
+    sessions.forEach(s => { const k=ccMonthKey(s.createdAt); (window._ccSessionsByMonth[k]=window._ccSessionsByMonth[k]||[]).push(s); });
+    const ccMonthKeys = [...new Set(sessions.map(s=>ccMonthKey(s.createdAt)))];
+    if (!ccMonthKeys.includes(ccCurKey)) ccMonthKeys.push(ccCurKey);
+    ccMonthKeys.sort().reverse();
+    const ccMonthOpts = ccMonthKeys.map(k=>`<option value="${k}"${k===ccCurKey?' selected':''}>${ccMonthLabel(k)}</option>`).join('');
 
     // Build full location list from all known sources
     const locSet = new Set();
@@ -3088,31 +3126,30 @@ function showCycleCountStart() {
         <button class="btn btn-primary" style="width:100%;margin-top:12px;font-size:14px;padding:12px" onclick="startCycleCount()">Start Count →</button>
       </div>
 
-      <!-- Recent counts -->
+      <!-- Monthly counts (audit) -->
       <div>
-        <div style="font-size:11px;color:var(--text2);letter-spacing:1px;margin-bottom:10px;font-weight:bold">RECENT COUNTS</div>
-        <div id="cc-inline-history">`;
-
-    const recent = sessions.slice(0,10);
-    if (!recent.length) {
-      html += '<div style="font-size:12px;color:var(--text2)">No cycle counts yet.</div>';
-    } else {
-      html += recent.map(s=>`
-        <div style="padding:9px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:12px">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:4px">
-            <span style="font-weight:bold;color:var(--accent);cursor:pointer" onclick="viewCCSession('${s.id}')">${s.id}</span>
-            ${isAdmin()?`<button onclick="confirmDeleteSession('${s.id}')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:0">✕</button>`:''}
-          </div>
-          <div style="color:var(--text2);font-size:11px;cursor:pointer" onclick="viewCCSession('${s.id}')">${new Date(s.createdAt).toLocaleString()} · ${s.countedBy}</div>
-          <div style="color:var(--text2);font-size:11px">${(s.locations||[]).length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted</span>`:''}</div>
-        </div>`).join('');
-    }
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px">
+          <div style="font-size:11px;color:var(--text2);letter-spacing:1px;font-weight:bold">COUNTS — <span id="cc-month-label"></span></div>
+          <select id="cc-month-select" onchange="loadCCMonth(this.value)" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:4px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">${ccMonthOpts}</select>
+        </div>
+        <div id="cc-month-list">`;
 
     html += `</div></div></div>`;
 
     panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
     window._ccAllLocs = storageLocs;
     window._ccSuggestedLocs = suggestedLocs.map(s=>s.loc);
+    renderCCMonthList(ccCurKey);
+    // Physically move any prior-month live sessions into the monthly archive node.
+    // Safe ordering: write archive copies first, confirm, THEN remove from live (worst case = a
+    // harmless duplicate, never data loss). cycleCount6049 then holds the current month only.
+    const ccPrior = Object.values(data).filter(s => ccMonthKey(s.createdAt) !== ccCurKey);
+    if (ccPrior.length) {
+      const upd = {}; ccPrior.forEach(s => upd['cycleCountArchive6049/'+ccMonthKey(s.createdAt)+'/'+s.id] = s);
+      db.ref().update(upd)
+        .then(() => { const rem = {}; ccPrior.forEach(s => rem['cycleCount6049/'+s.id] = null); return db.ref().update(rem); })
+        .catch(()=>{});
+    }
   });
 }
 
@@ -3713,7 +3750,14 @@ function updateVar(idx) { /* legacy — kept for compatibility */ }
 
 function viewCCSession(id) {
   if (!db) return;
-  db.ref('cycleCount6049/'+id).once('value', snap=>{ const s=snap.val(); if(s) showCCReport(s); });
+  db.ref('cycleCount6049/'+id).once('value', snap=>{
+    const s = snap.val();
+    if (s) { showCCReport(s); return; }
+    // Archived session — look it up in the loaded monthly-archive cache (read-only).
+    const arch = window._ccArchiveData || {};
+    for (const mk in arch) { if (arch[mk] && arch[mk][id]) { showCCReport(arch[mk][id]); return; } }
+    showAlert('Count not found.','warning');
+  });
 }
 
 function deleteSession(sessionId) {
