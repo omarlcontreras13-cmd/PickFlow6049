@@ -185,7 +185,8 @@
     </div>
     <div class="sidebar-actions">
       <button class="btn btn-primary" id="import-btn" onclick="showImport()">⬆ Import Data File</button>
-      <button class="btn btn-success" onclick="showNewTicket()" id="new-ticket-btn" disabled>+ New Pick Ticket</button>
+      <button class="btn btn-success" onclick="showNewTicket()" id="new-ticket-btn" disabled>+ Electrolit Pick Ticket</button>
+      <button class="btn btn-success" onclick="showNewTicket('maxxon')" id="maxxon-ticket-btn" style="border:1px solid var(--accent)">+ Maxxon Pick Ticket (FIFO)</button>
       <button class="btn" onclick="showNexusMenu()" id="nexus-btn" style="font-size:11px">📦 Nexus · Receipt / Pick</button>
       <button class="btn" onclick="showDataPreview()" id="preview-btn" disabled style="font-size:11px">🔍 Preview Data</button>
       <button class="btn" onclick="showInventorySummary()" id="custview-btn" style="font-size:11px;display:none">📦 Customer Inventory View</button>
@@ -1760,6 +1761,7 @@ function processImport(wb) {
     const cl = customer.toLowerCase();
     if (cl.includes('nexus')) customer = 'Nexus';
     else if (cl.includes('electrolit')) customer = 'Electrolit';
+    else if (cl.includes('maxxon')) customer = 'Maxxon';
 
     if (!sku || isNaN(pcs) || pcs<=0 || !loc) continue;
 
@@ -1853,12 +1855,60 @@ function buildHelperFrom(inv) {
 }
 function buildHelper() {
   state.helper = buildHelperFrom(state.inventory);
+  state.helperFifo = buildHelperFromFIFO(maxxonFifoSource());
+}
+
+function maxxonFifoSource() {
+  // Source for Maxxon FIFO picks: ALL available skids (any zone, any customer tag), matched
+  // downstream by SKU (same as Electrolit/FEFO matches by SKU). "Available" mirrors the app's
+  // own definition: not already picked, and not ghost / damaged / cycle-count stock.
+  const src = (state.rawInventory && state.rawInventory.length) ? state.rawInventory : state.inventory;
+  return src.filter(r => {
+    if ((r.pcsPending||0) > 0) return false;
+    const l=(r.location||'').toUpperCase(), st=(r.status||'').toUpperCase();
+    if (l.includes('22-GHOST')||st==='GHOST') return false;
+    if (st==='DAMAGED'||l.includes('22-REWORK')) return false;
+    if (l.includes('CYC_CNT')||l.includes('CYC-CNT')||l.includes('22-CYCLE')||st==='CYCLE COUNT') return false;
+    return true;
+  });
+}
+function buildHelperFromFIFO(inv) {
+  // Maxxon FIFO: rank pick locations by DATE RECEIVED (oldest first). NO restrictions —
+  // every AVAILABLE skid is one pallet position; no EXCLUDED-zone or full-pallet gating,
+  // and SKUs do not need to be in the QTY Guide just to be displayed.
+  const toDate = x => { if (!x) return null; const d = (x instanceof Date) ? x : new Date(x); return isNaN(d) ? null : d; };
+  const oldest = arr => arr.filter(Boolean).sort((a,b)=>a-b)[0]||null;
+  const locData = {};
+  inv.forEach(row => {
+    const key = row.sku+'|'+row.location;
+    if (!locData[key]) locData[key] = { sku:row.sku, location:row.location, recd:[], expDates:[], pallets:0 };
+    locData[key].recd.push(toDate(row.dateRecd));
+    locData[key].expDates.push(toDate(row.expDate));
+    locData[key].pallets += 1; // each inventory record = one skid / pallet position
+  });
+  const locList = Object.values(locData).map(d => ({
+    sku:d.sku, location:d.location,
+    oldestRecd: oldest(d.recd), oldestExp: oldest(d.expDates), pallets:d.pallets
+  }));
+  locList.sort((a,b) => {
+    if (a.sku!==b.sku) return a.sku.localeCompare(b.sku);
+    const ra = a.oldestRecd?a.oldestRecd.getTime():Infinity, rb = b.oldestRecd?b.oldestRecd.getTime():Infinity;
+    if (ra!==rb) return ra-rb;
+    return a.location.localeCompare(b.location);
+  });
+  const helper = []; const skuRanks = {};
+  locList.forEach(loc => {
+    if (!skuRanks[loc.sku]) skuRanks[loc.sku]=0;
+    skuRanks[loc.sku]++;
+    helper.push({ sku:loc.sku, palletQty:state.qtyGuide[loc.sku]||0, location:loc.location, oldestExp:loc.oldestExp, oldestRecd:loc.oldestRecd, availPallets:loc.pallets, rank:skuRanks[loc.sku] });
+  });
+  return helper;
 }
 
 // ─── ALLOCATIONS ─────────────────────────────────────────────────────────────
 // poNorm = normalized PO# for PO-scoped (Nexus) tickets, or null for standard SKU tickets.
 // Standard tickets only consume from prior standard tickets; PO tickets only from prior tickets on the SAME PO#.
-function getAllocatedBefore(ticketId, helper, poNorm) {
+function getAllocatedBefore(ticketId, helper, poNorm, fifoScope) {
   helper = helper || state.helper;
   poNorm = poNorm || null;
   const alloc = {};
@@ -1867,7 +1917,7 @@ function getAllocatedBefore(ticketId, helper, poNorm) {
     if (t.id === ticketId) break;
     const tPo = (t.po||'').trim();
     if (poNorm) { if (tPo !== poNorm) continue; }
-    else { if (tPo) continue; }
+    else { if (tPo) continue; if (!!fifoScope !== !!t.fifo) continue; }
     t.skus.forEach(sr => {
       if (!sr.sku || !sr.pcs) return;
       const pq = state.qtyGuide[sr.sku]; if (!pq) return;
@@ -1895,12 +1945,43 @@ function computeTicketLocations(ticket) {
     // Nexus PO reference lives in Prod ID 2 on the inventory rows (system PO# column not reliably mapped)
     helper = buildHelperFrom(state.inventory.filter(r => (r.prodId2||'').trim() === poNorm));
     prior  = getAllocatedBefore(ticket.id, helper, poNorm);
+  } else if (ticket.fifo) {
+    // Maxxon FIFO ticket: rank by date received (first in, first out), scoped to Maxxon inventory. Electrolit/FEFO path untouched.
+    helper = (state.helperFifo && state.helperFifo.length) ? state.helperFifo : buildHelperFromFIFO(maxxonFifoSource());
+    prior  = getAllocatedBefore(ticket.id, helper, null, true);
   } else {
     helper = state.helper;
     prior  = getAllocatedBefore(ticket.id, helper, null);
   }
   return ticket.skus.map(sr => {
     if (!sr.sku) return { ...sr, palletsNeeded:0, locations:[], rows:[], error:null };
+    if (ticket.fifo) {
+      // Maxxon: show ALL available locations for this SKU in FIFO order (by date received).
+      // Locations display even without a QTY Guide entry; the pallet COUNT needs the guide.
+      const pqM = state.qtyGuide[sr.sku] || 0;
+      const needM = pqM ? Math.floor((sr.pcs||0) / pqM) : 0;
+      const rowsForSku = helper.filter(h => h.sku === sr.sku).sort((a,b)=>a.rank-b.rank);
+      const locsM = []; let remM = needM;
+      rowsForSku.forEach(row => {
+        const key = sr.sku + '|' + row.location;
+        const avail = Math.max(0, row.availPallets - (prior[key] || 0));
+        if (avail <= 0) return;
+        const assign = remM > 0 ? Math.min(remM, avail) : 0;
+        locsM.push({ location:row.location, avail, assigned:assign, rank:row.rank, exp:row.oldestExp, recd:row.oldestRecd, displayOnly: assign===0 });
+        remM -= assign;
+      });
+      const rowsM = []; for (let i=0;i<locsM.length;i+=4) rowsM.push(locsM.slice(i,i+4));
+      // Diagnostic so an empty result is never silent:
+      let errM = null;
+      if (!pqM) errM = 'Add SKU to QTY Guide for pallet count';
+      else if (!locsM.length) {
+        const raw = (state.rawInventory && state.rawInventory.length) ? state.rawInventory : state.inventory;
+        const anySku = raw.some(r => (r.sku||'').toString().trim() === sr.sku);
+        if (!rowsForSku.length) errM = anySku ? 'SKU found but no Available inventory' : 'No inventory loaded for SKU "'+sr.sku+'"';
+        else errM = 'On-hand fully allocated to earlier tickets';
+      }
+      return { ...sr, palletQty:pqM, palletsNeeded:needM, locations:locsM, rows:rowsM, fulfilled: pqM ? remM<=0 : false, remaining:remM, error: errM };
+    }
     const pq = state.qtyGuide[sr.sku];
     if (!pq) return { ...sr, palletQty:0, palletsNeeded:0, locations:[], rows:[], error:'SKU not in QTY guide' };
     const need = Math.floor((sr.pcs||0) / pq);
@@ -1946,7 +2027,7 @@ function showDashboard() {
     </div>
     <div class="section-title">OPEN TICKETS</div>
     ${state.tickets.length===0
-      ? '<div class="alert alert-info">No pick tickets yet. Click "+ New Pick Ticket" to start.</div>'
+      ? '<div class="alert alert-info">No pick tickets yet. Click "+ Electrolit Pick Ticket" to start.</div>'
       : state.tickets.map(t=>`
         <div class="ticket-form" style="cursor:pointer;margin-bottom:12px" onclick="viewTicket('${t.id}')">
           <div style="display:flex;justify-content:space-between;align-items:center">
@@ -1964,25 +2045,27 @@ function showDashboard() {
 }
 
 // ─── NEW TICKET ───────────────────────────────────────────────────────────────
-function showNewTicket() {
+function showNewTicket(mode) {
+  if (mode==='maxxon' && !state.dataLoaded) { showAlert('No data loaded yet.','warning'); return; }
   if (state.tickets.length>=MAX_TICKETS) { showAlert('Maximum 20 tickets reached.','warning'); return; }
   const today = new Date().toISOString().split('T')[0];
   document.getElementById('modal-container').innerHTML = `
     <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
       <div class="modal">
-        <h2>+ NEW PICK TICKET</h2>
+        <h2>+ NEW ${mode==='maxxon'?'MAXXON ':''}PICK TICKET${mode==='maxxon'?' (FIFO)':''}</h2>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
           <div class="form-group"><label>DATE</label><input type="date" id="nd-date" value="${today}"></div>
           <div class="form-group"><label>CLERK *</label><input type="text" id="nd-clerk" placeholder="Your name" value="${state.currentUser ? state.currentUser.name : ''}" autofocus></div>
           <div class="form-group"><label>ORDER #</label><input type="text" id="nd-order" placeholder="e.g. 80070981"></div>
           <div class="form-group"><label>PICKER</label><input type="text" id="nd-picker" placeholder="Picker name"></div>
-          <div class="form-group"><label>CUSTOMER</label><input type="text" id="nd-customer" placeholder="e.g. Electrolit"></div>
+          <div class="form-group"><label>CUSTOMER</label><input type="text" id="nd-customer" placeholder="e.g. Electrolit" value="${mode==='maxxon'?'Maxxon':''}"></div>
           <div class="form-group"><label>DESTINATION</label><input type="text" id="nd-dest" placeholder="e.g. Canada Dry Delaware"></div>
           <div class="form-group"><label>APPT. TIME</label><input type="time" id="nd-appt" placeholder="e.g. 2:00 PM"></div>
           <div class="form-group"><label>PICK UP DATE</label><input type="date" id="nd-pickup"></div>
           <div style="grid-column:1/-1"></div>
         </div>
         <div class="form-group" style="margin-bottom:16px"><label>NOTES (optional)</label><input type="text" id="nd-notes" placeholder="Additional notes"></div>
+        <input type="hidden" id="nd-pickmode" value="${mode==='maxxon'?'FIFO':''}">
         <div class="modal-actions">
           <button class="btn" onclick="closeModal()">Cancel</button>
           <button class="btn btn-primary" onclick="createTicket()">Create Ticket →</button>
@@ -2007,6 +2090,7 @@ function createTicket() {
     appt: document.getElementById('nd-appt').value.trim(),
     pickupDate: document.getElementById('nd-pickup').value,
     notes: document.getElementById('nd-notes').value.trim(),
+    fifo: ((document.getElementById('nd-pickmode')||{}).value === 'FIFO'),
     created: Date.now(),
     skus: [{sku:'',pcs:0}]
   };
@@ -5295,8 +5379,7 @@ function showDataPreview() {
             <label>CUSTOMER</label>
             <select id="inv-cust-filter" onchange="applyInvFilter('cust',this.value)" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:12px;outline:none;width:100%">
               <option value="" ${custFilter===''?'selected':''}>All customers</option>
-              <option value="Electrolit" ${custFilter==='Electrolit'?'selected':''}>Electrolit</option>
-              <option value="Nexus" ${custFilter==='Nexus'?'selected':''}>Nexus Circular</option>
+              ${[...new Set((state.rawInventory&&state.rawInventory.length?state.rawInventory:state.inventory).map(r=>(r.customer||'').trim()).filter(Boolean))].sort().map(c=>`<option value="${c}" ${custFilter===c?'selected':''}>${c==='Nexus'?'Nexus Circular':c}</option>`).join('')}
             </select>
           </div>
           <div class="form-group">
