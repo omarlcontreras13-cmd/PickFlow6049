@@ -5287,9 +5287,13 @@ function showDataPreview() {
           <div class="form-group">
             <label>CUSTOMER</label>
             <select id="inv-cust-filter" onchange="applyInvFilter('cust',this.value)" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-family:var(--font);font-size:12px;outline:none;width:100%">
-              <option value="" ${custFilter===''?'selected':''}>All customers</option>
-              <option value="Electrolit" ${custFilter==='Electrolit'?'selected':''}>Electrolit</option>
-              <option value="Nexus" ${custFilter==='Nexus'?'selected':''}>Nexus Circular</option>
+              ${(function(){
+                const _inv = state.rawInventory.length ? state.rawInventory : state.inventory;
+                const _vals = [...new Set(_inv.map(r=>(r.customer||'').trim()).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+                const _lbl = c => c==='Nexus' ? 'Nexus Circular' : c;
+                return ['<option value="" '+(custFilter===''?'selected':'')+'>All customers</option>']
+                  .concat(_vals.map(c=>'<option value="'+c.replace(/"/g,'&quot;')+'" '+(custFilter===c?'selected':'')+'>'+_lbl(c)+'</option>')).join('');
+              })()}
             </select>
           </div>
           <div class="form-group">
