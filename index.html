@@ -1880,6 +1880,29 @@ function getAllocatedBefore(ticketId, helper, poNorm) {
   return alloc;
 }
 
+// Suggest a pallet qty for a SKU missing from the guide = its most common on-hand pcs (full-pallet value)
+function _suggestPalletQty(sku){
+  const inv = (state.rawInventory && state.rawInventory.length) ? state.rawInventory : state.inventory;
+  const counts={};
+  inv.forEach(r=>{ if(r.sku===sku && r.pcs>0) counts[r.pcs]=(counts[r.pcs]||0)+1; });
+  let best='', bestN=-1;
+  Object.keys(counts).forEach(p=>{ if(counts[p]>bestN){ bestN=counts[p]; best=p; } });
+  return best;
+}
+
+// Add a SKU to the QTY guide inline from the pick ticket, then rebuild + re-render.
+function addSkuToGuide(sku, ticketId){
+  const el = document.getElementById('qg-add-'+sku);
+  const qty = el ? parseFloat(el.value) : NaN;
+  if (!qty || isNaN(qty) || qty<=0) { showAlert('Enter a valid pcs-per-pallet quantity for SKU '+sku+'.','warning'); return; }
+  state.qtyGuide[sku] = qty;
+  saveState();
+  syncQtyGuideToFirebase();
+  buildHelper();
+  showAlert('SKU '+sku+' added to QTY Guide at '+qty+' pcs/pallet.','success');
+  viewTicket(ticketId);
+}
+
 function computeTicketLocations(ticket) {
   // PO-scoped (Nexus) ticket: rank only the inventory carrying this PO#, otherwise identical logic.
   const poNorm = (ticket.po||'').trim();
@@ -2114,7 +2137,7 @@ function viewTicket(id) {
         html+=`<tr>
           ${gi===0?`<td style="color:var(--accent)">${c.sku}</td><td style="color:var(--text2);font-size:11px">${name}</td><td>${c.pcs||''}</td><td>${c.palletsNeeded||''}</td>`:'<td colspan="4" style="color:var(--text2);font-size:10px;text-align:center">↳ cont.</td>'}
           ${cells.map(loc=>`<td>${loc?`<span class="loc-tag">${loc.location}</span>`:'<span class="loc-empty">—</span>'}</td><td>${loc?`<span style="color:var(--accent2);font-weight:bold">${loc.avail}</span>`:'—'}</td>`).join('')}
-          ${gi===0?`<td rowspan="${groups.length}" style="text-align:center">${c.error?`<span style="color:var(--danger);font-size:11px">${c.error}</span>`:c.fulfilled?`<span style="color:var(--accent2)">✓</span>`:`<span style="color:var(--warning)">⚠ -${c.remaining}</span>`}</td>`:''}
+          ${gi===0?`<td rowspan="${groups.length}" style="text-align:center">${c.error==='SKU not in QTY guide'?`<div style="font-size:9px;color:var(--danger);margin-bottom:2px;letter-spacing:.5px;font-weight:bold">NOT IN QTY GUIDE</div><div style="display:flex;gap:3px;align-items:center;justify-content:center"><input id="qg-add-${c.sku}" type="number" min="1" step="1" value="${_suggestPalletQty(c.sku)}" title="pcs per pallet" style="width:58px;padding:2px 4px;border:1px solid var(--warning);border-radius:4px;font-size:11px;text-align:center" onkeydown="if(event.key==='Enter')addSkuToGuide('${c.sku}','${id}')"><button class="btn btn-sm" onclick="addSkuToGuide('${c.sku}','${id}')" style="font-size:10px;padding:2px 7px">Add</button></div>`:c.error?`<span style="color:var(--danger);font-size:11px">${c.error}</span>`:c.fulfilled?`<span style="color:var(--accent2)">✓</span>`:`<span style="color:var(--warning)">⚠ -${c.remaining}</span>`}</td>`:''}
         </tr>`;
       });
     });
