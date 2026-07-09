@@ -273,6 +273,31 @@ function syncQtyGuideToFirebase() {
     .catch(e => console.error('QTY sync error', e));
 }
 
+// Merge-safe inventory write: replace ONLY the customers in this import, merged against the
+// FRESHEST Firebase copy (inventory + rawInventory), so an import from a device whose local
+// copy was behind can never clobber inventory another device imported. Falls back on read error.
+function commitInventoryFresh6049(replaceSet) {
+  const rs = (replaceSet instanceof Set) ? replaceSet : new Set(replaceSet||['']);
+  const invC = r => ({ s:r.sku, p:r.pcs, l:r.location, e:r.expDate?r.expDate.getTime():null,
+    lot:r.lot||'', skid:r.skid||'', po:r.po||'', gw:r.grossWt||'', bol:r.bol||'',
+    pp:r.pcsPending||0, pi2:r.prodId2||'', cu:r.customer||'', dr:r.dateRecd?r.dateRecd.getTime():null });
+  const rawC = r => ({ s:r.sku, p:r.pcs, l:r.location, e:r.expDate?r.expDate.getTime():null,
+    st:r.status||'', lot:r.lot||'', skid:r.skid||'', po:r.po||'', gw:r.grossWt||'', bol:r.bol||'',
+    pp:r.pcsPending||0, pi2:r.prodId2||'', cu:r.customer||'', dr:r.dateRecd?r.dateRecd.getTime():null });
+  const mineInv = state.inventory.filter(r => rs.has(r.customer||'')).map(invC);
+  const mineRaw = state.rawInventory.filter(r => rs.has(r.customer||'')).map(rawC);
+  if (!db) return;
+  Promise.all([db.ref('inventory').once('value'), db.ref('rawInventory').once('value')]).then(([iS,rS]) => {
+    const iV=iS.val(), rV=rS.val();
+    const iArr = Array.isArray(iV)?iV:(iV?Object.values(iV):[]);
+    const rArr = Array.isArray(rV)?rV:(rV?Object.values(rV):[]);
+    const iKept = iArr.filter(r => r && !rs.has(r.cu||''));
+    const rKept = rArr.filter(r => r && !rs.has(r.cu||''));
+    db.ref('inventory').set(iKept.concat(mineInv)).then(()=>showAlert(' Inventory synced to all users.','success')).catch(e=>console.error(e));
+    db.ref('rawInventory').set(rKept.concat(mineRaw)).catch(e=>console.error(e));
+  }).catch(() => { syncInventoryToFirebase(); });
+}
+
 function syncInventoryToFirebase() {
   const compact = state.inventory.map(r => ({
     s: r.sku, p: r.pcs, l: r.location,
@@ -1786,7 +1811,7 @@ function processImport(wb) {
   try { localStorage.setItem('pickflow_inv', JSON.stringify(state.inventory)); } catch(e) {}
   try { localStorage.setItem('pickflow_rawinv', JSON.stringify(state.rawInventory)); } catch(e) {}
   state.lastImport = Date.now();
-  syncInventoryToFirebase();
+  commitInventoryFresh6049(replaceSet);
   db.ref('lastImport').set(state.lastImport).catch(e=>{});
   document.getElementById('new-ticket-btn').disabled = false;
   document.getElementById('preview-btn').disabled = false;
