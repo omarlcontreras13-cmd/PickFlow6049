@@ -1972,6 +1972,41 @@ function goHome() {
   updateTicketList();
   showDashboard();
 }
+// ─── PICK-TICKET STAGE (status flag + user stamps) ────────────────────
+// Two stages: created -> printed (set automatically when the Pick Ticket is generated).
+// Each is stamped {by,at} with date+time; created uses the ticket creator.
+function _who(){ return (state.currentUser && state.currentUser.name) ? state.currentUser.name : 'Unknown'; }
+function _stampWhen(ts){ try{ return new Date(ts).toLocaleString('en-US',{month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return ''; } }
+function ticketStamp(t, stage){
+  if (stage==='created') return { by:(t.clerk||t.creator||''), at:t.created };
+  return (t.stamps && t.stamps[stage]) ? t.stamps[stage] : null;
+}
+function ticketStageInfo(t){
+  const s = (((t&&t.status)||'')+'').toLowerCase();
+  if (s==='printed'||s==='staged'||s==='completed') return {label:'PRINTED', bg:'#86efac', border:'#4ade80', icon:'🖨'};
+  return {label:'CREATED', bg:'#facc15', border:'#eab308', icon:'✎'};
+}
+function ticketStageBadge(t, small){
+  const info = ticketStageInfo(t);
+  const pad = small ? '0 6px' : '1px 8px', fs = small ? '9px' : '10px';
+  return '<span style="display:inline-block;background:'+info.bg+';border:1px solid '+info.border+';color:#000;border-radius:10px;padding:'+pad+';font-size:'+fs+';font-weight:bold;letter-spacing:.5px;white-space:nowrap">'+info.icon+' '+info.label+'</span>';
+}
+function ticketStampLine(t){
+  const s = (((t&&t.status)||'')+'').toLowerCase();
+  const stage = (s==='printed'||s==='staged'||s==='completed') ? 'printed' : 'created';
+  const st = ticketStamp(t, stage); if (!st || !st.by) return '';
+  return 'by '+st.by+(st.at?' · '+_stampWhen(st.at):'');
+}
+function ticketStageHistory(t){
+  const order = [['created','Created'],['printed','Printed']];
+  const parts = [];
+  order.forEach(function(o){ const st = ticketStamp(t, o[0]); if (st && st.by) parts.push('<span style="font-size:11px;color:var(--text2);white-space:nowrap">'+o[1]+' by <strong style="color:var(--text)">'+st.by+'</strong>'+(st.at?' · '+_stampWhen(st.at):'')+'</span>'); });
+  return parts.join('<span style="color:var(--text2);margin:0 6px">·</span>');
+}
+function ticketTotalPcs(t){ return (t.skus||[]).reduce((s,x)=>s+(+x.pcs||0),0); }
+function ticketTotalPallets(t){ return (t.skus||[]).reduce((s,x)=>{ const pq=state.qtyGuide[((x.sku||'')+'').trim()]||0; return s+(pq?Math.floor((+x.pcs||0)/pq):0); },0); }
+function ticketSkuCount(t){ return (t.skus||[]).filter(x=>x.sku).length; }
+
 function showDashboard() {
   state.currentView = 'dashboard';
   const totalSkus=Object.keys(state.qtyGuide).length;
@@ -1997,8 +2032,10 @@ function showDashboard() {
               <div style="font-size:11px;color:var(--text2);margin-top:2px">${t.creator}${t.appt?' · Appt: '+t.appt:''} · ${new Date(t.created).toLocaleDateString()}</div>
             </div>
             <div style="text-align:right">
-              <div style="font-size:12px;color:var(--accent2)">${t.skus.filter(s=>s.sku).length} SKUs</div>
+              <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">${ticketStageBadge(t)}<div style="font-size:13px;color:var(--accent2);font-weight:bold">${ticketTotalPcs(t).toLocaleString()} pcs</div></div>
+              <div style="font-size:11px;color:var(--text2)">${ticketTotalPallets(t)} pallets · ${ticketSkuCount(t)} SKUs</div>
               ${t.picker?`<div style="font-size:11px;color:var(--text2)">Picker: ${t.picker}</div>`:''}
+              <div style="font-size:11px;color:var(--text2);margin-top:3px">${ticketStampLine(t)}</div>
             </div>
           </div>
         </div>`).join('')}`;
@@ -2067,6 +2104,7 @@ function updateTicketList() {
       <div class="tid">${t.id}</div>
       <div class="tname">${t.creator}${t.orderNum?' · #'+t.orderNum:''}</div>
       <div class="tmeta">${t.po?'PO# '+t.po+' · ':''}${t.dest||''}${t.dest&&t.skus.filter(s=>s.sku).length?' · ':''}${t.skus.filter(s=>s.sku).length} SKUs</div>
+      <div style="margin-top:3px">${ticketStageBadge(t,true)}</div>
     </div>`).join('');
 }
 
@@ -2087,6 +2125,7 @@ function viewTicket(id) {
         <div style="font-size:10px;color:var(--text2);letter-spacing:2px;border:1px solid var(--border);padding:2px 8px;border-radius:4px">ORDER PICK TICKET</div>
         ${ticket.po?`<div style="font-size:10px;color:var(--accent);letter-spacing:2px;border:1px solid var(--accent);padding:2px 8px;border-radius:4px;font-weight:bold">NEXUS · PO# ${ticket.po}</div>`:''}
       </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">${ticketStageBadge(ticket)}${ticketStageHistory(ticket)}</div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px 20px;margin-bottom:16px">
         <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">DATE</div><div style="font-size:13px">${fmtDate}</div></div>
         <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">CLERK</div><div style="font-size:13px">${ticket.creator||'—'}</div></div>
@@ -2310,6 +2349,10 @@ function exportPickTicketWord(id, fromArchive=false) {
     ? state.archivedTickets.find(t=>t.id===id)
     : state.tickets.find(t=>t.id===id);
   if (!ticket) return;
+  if (!fromArchive) {
+    const _st = ((ticket.status||'')+'').toLowerCase();
+    if (_st!=='printed') { ticket.status='printed'; ticket.stamps=ticket.stamps||{}; ticket.stamps.printed={by:_who(), at:Date.now()}; saveState(); updateTicketList(); if(!state.activeTicket) showDashboard(); }
+  }
 
   const computed = computeTicketLocations(ticket);
   const {jsPDF} = window.jspdf;
