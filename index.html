@@ -2070,6 +2070,60 @@ function showNewTicket() {
   setTimeout(()=>document.getElementById('nd-clerk').focus(),100);
 }
 
+// ─── DUPLICATE PICK-TICKET CHECK (against archive) ────────────────────────────
+// Flags a likely duplicate when the live ticket's Order # + a SKU row's SKU + PCS
+// all match an ARCHIVED ticket. Non-blocking — clerk decides.
+function _dupNorm(v){ return (v==null?'':String(v)).trim().toUpperCase(); }
+// Match the live ticket's Order # + a SKU row's SKU + PCS against BOTH archived
+// and other OPEN tickets. selfId excludes the ticket being edited.
+function _dupMatches6049(orderNum, sku, pcs, selfId){
+  const o=_dupNorm(orderNum), s=_dupNorm(sku), p=(parseFloat(pcs)||0);
+  if (!o || !s || !p) return [];   // need all three
+  const out=[];
+  function scan(list, source){
+    (list||[]).forEach(function(t){
+      if (t.id===selfId) return;
+      if (_dupNorm(t.orderNum)!==o) return;
+      (t.skus||[]).forEach(function(x){
+        if (_dupNorm(x.sku)===s && (parseFloat(x.pcs)||0)===p){
+          out.push({ id:t.id, source:source, orderNum:t.orderNum||'', when:(source==='open'?(t.created||0):(t.archivedAt||t.created||0)), sku:x.sku, pcs:x.pcs });
+        }
+      });
+    });
+  }
+  scan(state.tickets, 'open');
+  scan(state.archivedTickets, 'archive');
+  return out;
+}
+function checkDuplicateTicket6049(tid){
+  const host=document.getElementById('dup-warn-6049');
+  const ticket=state.tickets.find(t=>t.id===tid);
+  if (!host||!ticket){ if(host) host.innerHTML=''; return; }
+  const seen={}, hits=[];
+  (ticket.skus||[]).forEach(function(x){
+    const matches=_dupMatches6049(ticket.orderNum, x.sku, x.pcs, tid);
+    matches.forEach(function(m){ const k=m.source+'|'+m.id+'|'+_dupNorm(m.sku)+'|'+(parseFloat(m.pcs)||0); if(!seen[k]){ seen[k]=1; hits.push(m); } });
+  });
+  if (!hits.length){ host.innerHTML=''; return; }
+  const byTicket={};
+  hits.forEach(function(m){ (byTicket[m.id]=byTicket[m.id]||{id:m.id,source:m.source,orderNum:m.orderNum,when:m.when,lines:[]}).lines.push(m); });
+  const rowsHtml=Object.values(byTicket).slice(0,5).map(function(g){
+    const d=g.when?new Date(g.when).toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric'}):'—';
+    const isOpen=g.source==='open';
+    const detail=g.lines.map(function(l){return _dupNorm(l.sku)+' × '+(parseFloat(l.pcs)||0)+' pcs';}).join(', ');
+    const linkFn=isOpen?('viewTicket(\''+g.id+'\')'):('viewArchivedTicket(\''+g.id+'\')');
+    const linkTxt=isOpen?'Open pick ticket →':'Open archived ticket →';
+    return '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:3px">'
+      +'<span style="font-size:11px;color:#7a1f1f">'+(isOpen?'Open ticket ':'Archived ')+d+' — Order #'+_dupNorm(g.orderNum)+' ('+detail+')</span>'
+      +'<a href="#" onclick="event.preventDefault();'+linkFn+'" style="font-size:11px;font-weight:700;color:#b91c1c;text-decoration:underline;cursor:pointer">'+linkTxt+'</a>'
+      +'</div>';
+  }).join('');
+  host.innerHTML='<div style="margin:6px 0;padding:8px 11px;border:1.5px solid #b91c1c;background:rgba(185,28,28,0.08);border-radius:6px">'
+    +'<div style="font-size:12px;font-weight:800;color:#b91c1c;letter-spacing:.3px">⚠ POSSIBLE DUPLICATE — this Order #, SKU and PCS already exist.</div>'
+    +rowsHtml
+    +'<div style="font-size:10px;color:var(--text2);margin-top:4px">Verify before continuing to avoid a duplicate pick ticket.</div></div>';
+}
+
 function createTicket() {
   const clerk = document.getElementById('nd-clerk').value.trim();
   if (!clerk) { document.getElementById('nd-clerk').style.borderColor='var(--danger)'; return; }
@@ -2181,6 +2235,7 @@ function viewTicket(id) {
       <div></div><div></div>
     </div>
     `}
+    <div id="dup-warn-6049"></div>
     <div style="display:flex;gap:8px;margin-bottom:20px">
       <button class="btn btn-sm" onclick="addSkuRow('${id}')">+ Add SKU Row</button>
       <button class="btn btn-sm btn-primary" onclick="viewTicket('${id}')">↻ Refresh Locations</button>
@@ -2209,6 +2264,7 @@ function viewTicket(id) {
   }
   document.getElementById('main-panel').innerHTML = html;
   const _t = state.tickets.find(t=>t.id===id); if(_t) setTimeout(()=>updateSkuTotals(_t),100);
+  try { checkDuplicateTicket6049(id); } catch(e){}
 }
 
 function updateSkuTotals(ticket) {
@@ -2246,6 +2302,7 @@ function updateSku(tid,idx,field,val) {
   if (inputsEl) inputsEl.innerHTML = t.skus.map((s,i)=>(t.po?renderNexusSkuInput(s,i,tid):renderSkuInput(s,i,tid))).join('');
   updateSkuTotals(t);
   saveState();
+  try { checkDuplicateTicket6049(tid); } catch(e){}
 }
 // Description for a Nexus pick line = what was received under that PO under that UOM (from saved inbound receipts)
 function nexusDescFor(ticket, sku, uom) {
