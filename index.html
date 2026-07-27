@@ -141,6 +141,7 @@
     <span id="ticket-count">0 / 20 TICKETS</span>
     <span id="sync-status" class="sync-indicator sync-pending">⟳ CONNECTING...</span>
     <span id="current-time"></span>
+    <span id="app-version" title="App version — confirm everyone is on the same build" style="font-size:10px;color:var(--accent2);letter-spacing:1px;border:1px solid var(--accent2);padding:1px 6px;border-radius:3px;font-weight:bold">v36</span>
     <button onclick="goHome()" title="Home" style="padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--accent);cursor:pointer;font-size:14px;line-height:1">🏠</button>
     <button onclick="location.reload(true)" style="padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text2);cursor:pointer;font-family:var(--font);font-size:10px;letter-spacing:1px" title="Force refresh to latest version">↻ REFRESH APP</button>
   </div>
@@ -319,6 +320,32 @@ function syncInventoryToFirebase() {
   db.ref('rawInventory').set(rawCompact).catch(e => console.error('Raw inv sync error', e));
 }
 
+// ─── AUTO-UPDATE ───────────────────────────────────────────
+// Publishes this build to Firebase; when a newer build is published elsewhere, open
+// clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
+const APP_BUILD = 36;
+const VERSION_PATH = 'appVersion';
+function _versionDoReload(remote){
+  const a=document.activeElement;
+  if(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)){ setTimeout(function(){ _versionDoReload(remote); }, 4000); return; }  // don't interrupt data entry
+  try{ location.reload(true); }catch(e){ location.reload(); }
+}
+function _versionGuard(){
+  try{ const el=document.getElementById('app-version'); if(el) el.textContent='v'+APP_BUILD; }catch(e){}
+  if(!db) return;
+  db.ref(VERSION_PATH).on('value', function(snap){
+    const remote = parseInt(snap.val(),10) || 0;
+    if(remote > APP_BUILD){
+      let tried=0; try{ tried=parseInt(sessionStorage.getItem('pf_reload_build'),10)||0; }catch(e){}
+      if(tried>=remote) return;                        // already reloaded for this build — avoid a loop if the served file is still old
+      try{ sessionStorage.setItem('pf_reload_build', String(remote)); }catch(e){}
+      try{ showAlert('🔄 New version v'+remote+' available — updating…','info'); }catch(e){}
+      setTimeout(function(){ _versionDoReload(remote); }, 1500);
+    } else if(remote < APP_BUILD){
+      db.ref(VERSION_PATH).set(APP_BUILD).catch(function(){});
+    }
+  }, function(){});
+}
 function listenToFirebase() {
   if (!initFirebase()) {
     // Retry after 2 seconds if Firebase not ready
@@ -326,6 +353,7 @@ function listenToFirebase() {
     return;
   }
   setSyncStatus('connecting');
+  _versionGuard();
 
   db.ref('tickets').on('value', snap => {
     const data = snap.val() || {};
@@ -1986,7 +2014,8 @@ function ticketStamp(t, stage){
 }
 function ticketStageInfo(t){
   const s = (((t&&t.status)||'')+'').toLowerCase();
-  if (s==='printed'||s==='staged'||s==='completed') return {label:'PRINTED', bg:'#86efac', border:'#4ade80', icon:'🖨'};
+  const printed = (s==='printed'||s==='staged'||s==='completed') || !!(t&&t.stamps&&t.stamps.printed&&t.stamps.printed.by);
+  if (printed) return {label:'PRINTED', bg:'#86efac', border:'#4ade80', icon:'🖨'};
   return {label:'CREATED', bg:'#facc15', border:'#eab308', icon:'✎'};
 }
 function ticketStageBadge(t, small){
@@ -1995,10 +2024,11 @@ function ticketStageBadge(t, small){
   return '<span style="display:inline-block;background:'+info.bg+';border:1px solid '+info.border+';color:#000;border-radius:10px;padding:'+pad+';font-size:'+fs+';font-weight:bold;letter-spacing:.5px;white-space:nowrap">'+info.icon+' '+info.label+'</span>';
 }
 function ticketStampLine(t){
-  const s = (((t&&t.status)||'')+'').toLowerCase();
-  const stage = (s==='printed'||s==='staged'||s==='completed') ? 'printed' : 'created';
-  const st = ticketStamp(t, stage); if (!st || !st.by) return '';
-  return 'by '+st.by+(st.at?' · '+_stampWhen(st.at):'');
+  const c=ticketStamp(t,'created'), p=ticketStamp(t,'printed');
+  const parts=[];
+  if(c && c.by) parts.push('Created · '+c.by+(c.at?' · '+_stampWhen(c.at):''));
+  if(p && p.by) parts.push('<span style="color:var(--accent2);font-weight:600">Printed · '+p.by+(p.at?' · '+_stampWhen(p.at):'')+'</span>');
+  return parts.length ? parts.join('<br>') : '';
 }
 function ticketStageHistory(t){
   const order = [['created','Created'],['printed','Printed']];
@@ -5647,6 +5677,7 @@ function _ediRestore(){
   catch (e) { console.warn('EDI restore failed', e); }
 }
 function _ediInputFocused(){
+  if (window._elxEditing) return true;
   const a = document.activeElement;
   if (!a || !a.id) return false;
   return /^(elx-|edi-)/.test(a.id);
@@ -5665,6 +5696,7 @@ function _ediListen(){
       const localHas = (window._elxLoads||[]).length;
       if (localHas) { _ediLastWritten = {}; _ediSave(); return; }
     }
+    if (_ediInputFocused()) return;   // mid-edit — don't rebuild the model/UI under the user
     window._elxLoads = _ediUnpack(d.elx);
     // Record what we received so the next _ediSave() doesn't echo it back.
     const cur = _ediSnapshot();
@@ -5906,6 +5938,18 @@ function _elxExportAoa(load, expDate){
 }
 // ── Electrolit UI handlers ────────────────────────────────────────────────────
 // ── Electrolit PDF (Bill of Lading) OCR path ──────────────────────────────────
+// Rotate a canvas by 90/180/270° (for scans that come in sideways/upside-down).
+function _elxRotateCanvas(src, deg){
+  const swap = (deg===90||deg===270);
+  const cv=document.createElement('canvas');
+  cv.width  = swap ? src.height : src.width;
+  cv.height = swap ? src.width  : src.height;
+  const ctx=cv.getContext('2d');
+  ctx.translate(cv.width/2, cv.height/2);
+  ctx.rotate(deg*Math.PI/180);
+  ctx.drawImage(src, -src.width/2, -src.height/2);
+  return cv;
+}
 function _elxBinarize(src, thr){
   const cv=document.createElement('canvas'); cv.width=src.width; cv.height=src.height;
   const ctx=cv.getContext('2d'); ctx.drawImage(src,0,0);
@@ -5947,39 +5991,69 @@ async function _elxOcrBol(buf){
   let headerBlob=''; const rows=[];
   for(let i=1;i<=N;i++){
     showAlert('Electrolit PDF OCR — page '+i+' of '+N+'…','info');
-    const base=await canvasAt(await pdf.getPage(i),3);
-    const bin=_elxBinarize(base,185);
-    const words=_elxWordsFromOcr(await recFull(bin));
+    let base=await canvasAt(await pdf.getPage(i),3);
+    let words=_elxWordsFromOcr(await recFull(_elxBinarize(base,185)));
+    let det=_elxBolRowsFromWords(words);
+    // Auto-correct a sideways / upside-down scan: if no SKU rows were found at the
+    // rendered orientation, rotate the page and re-OCR until the item rows appear.
+    if(!det.rows.length){
+      const cand=[90,270,180];
+      for(let a=0;a<cand.length;a++){
+        const rb=_elxRotateCanvas(base,cand[a]);
+        const rw=_elxWordsFromOcr(await recFull(_elxBinarize(rb,185)));
+        const rd=_elxBolRowsFromWords(rw);
+        if(rd.rows.length){ base=rb; words=rw; det=rd; break; }
+      }
+    }
     const lines=_elxOcrLines(words);
     if(i===1){ headerBlob += lines.join('\n')+'\n';
       const w2=_elxWordsFromOcr(await recFull(_elxBinarize(base,205))); headerBlob += _elxOcrLines(w2).join('\n')+'\n'; }
-    const det=_elxBolRowsFromWords(words);
     if(!det.rows.length) continue;
-    // Zoom each row's Version cell and re-OCR with a restricted charset for accurate LOTs.
-    let zoomOk=true;
-    try{ await worker.setParameters({tessedit_pageseg_mode:'7', tessedit_char_whitelist:'PT0123456789'}); }catch(e){ zoomOk=false; }
     if(det.rows.length) showAlert('Electrolit PDF — reading '+det.rows.length+' LOT #s (page '+i+')…','info');
+    // Read each row's LOT from the FULL-PAGE OCR by coordinate: take the version-
+    // pattern word whose y is closest to the SKU row. This is far more reliable than
+    // re-OCRing a tiny isolated cell (which starves Tesseract on lower-res scans) and,
+    // unlike the old text-line fallback, it never smears one LOT across rows that
+    // share the same SKU (every pallet here is the same item).
+    const hasBand = det.vx1>det.vx0;
+    const vwords = words.filter(function(w){
+      const s=w.s.replace(/\s/g,'');
+      if(!/\d{2}[t7]\d{3}/i.test(s)) return false;
+      return hasBand ? (w.x>=det.vx0-30 && w.x<=det.vx1+30) : true;
+    });
     for(let ri=0; ri<det.rows.length; ri++){
-      const r=det.rows[ri]; let lot='';
-      if(zoomOk && det.vx1>det.vx0){
-        try{
-          const cw=det.vx1-det.vx0, ch=30, zoom=5;
-          const cc=document.createElement('canvas'); cc.width=cw*zoom; cc.height=ch*zoom;
-          // Crop from the GRAYSCALE base — binarizing this cell destroys the '0' glyph (reads as 6/8).
-          cc.getContext('2d').drawImage(base, det.vx0, r.y-15, cw, ch, 0, 0, cw*zoom, ch*zoom);
-          const cd=await worker.recognize(cc);
-          lot=_elxVersion((cd&&cd.data&&cd.data.text)||'');
-        }catch(e){ lot=''; }
-      }
+      const r=det.rows[ri];
+      let best='', bd=1e9;
+      vwords.forEach(function(w){ const d=Math.abs(w.y-r.y); if(d<bd){ bd=d; best=w.s; } });
+      let lot=_elxVersion(best);
       if(!lot){ const ln=lines.find(function(l){ return l.indexOf(r.item)>=0; }); if(ln) lot=_elxVersion(ln); }
       rows.push({ sku:r.sku, lot:lot, unknownSku:r.unknownSku });
     }
-    try{ await worker.setParameters({tessedit_pageseg_mode:'3', tessedit_char_whitelist:''}); }catch(e){}
   }
-  // Smooth isolated LOT misreads / fill blanks flanked by two identical neighbors.
-  const _sm=_elxSmoothLots(rows.map(function(r){return r.lot;}));
+  // Clean LOT misreads: snap a rare single-digit-off value to the real (repeated)
+  // LOT it's closest to, then fill/settle any isolated outlier or blank.
+  const _sm=_elxSmoothLots(_elxSnapLots(rows.map(function(r){return r.lot;})));
   rows.forEach(function(r,i){ r.lot=_sm[i]; });
   return { header:_elxBolHeader(headerBlob), rows:rows };
+}
+// Snap a rare LOT value that is a single-digit OCR confusion (e.g. 1969→1909,
+// 1920→1910) onto a "real" LOT — one that repeats on the load. Values that repeat
+// are treated as anchors and left alone; genuinely distinct one-off LOTs (2+ digits
+// from every anchor) are preserved, so a real single-pallet LOT is never corrupted.
+function _elxSnapLots(lots){
+  const out=lots.slice();
+  const freq={}; out.forEach(function(v){ if(v) freq[v]=(freq[v]||0)+1; });
+  const anchors=Object.keys(freq).filter(function(k){ return freq[k]>=2; });
+  if(!anchors.length) return out;
+  function dg(v){ return String(v).replace(/\D/g,''); }
+  function dist(a,b){ a=dg(a); b=dg(b); if(a.length!==b.length) return 99; let d=0; for(let i=0;i<a.length;i++){ if(a[i]!==b[i]) d++; } return d; }
+  for(let i=0;i<out.length;i++){
+    const v=out[i]; if(!v || freq[v]>=2) continue;
+    let best=null, bd=99;
+    anchors.forEach(function(a){ const d=dist(v,a); if(d<bd){ bd=d; best=a; } });
+    if(best && bd<=1) out[i]=best;
+  }
+  return out;
 }
 // Correct an isolated LOT value (or blank) sitting between two identical neighbors.
 // Two passes so a blank flanked by a run fills, then propagates. Preserves genuine
@@ -6037,7 +6111,10 @@ function _elxBuildBolLoad(ocr){
   const lines=rows.map(function(r){ const m=ELX_MASTER[r.sku];
     return { sku:r.sku, productId:(m&&m[0])?m[0]:'', lot:r.lot, pcs:(m&&m[3]!=null)?m[3]:'',
              net:(m&&m[1]!=null)?m[1]:'', gross:(m&&m[2]!=null)?m[2]:'', unknownSku:!m }; });
-  return { order:header.order||'', po:header.po||'', multiPo:false, pos:header.po?[header.po]:[],
+  // On these Source Logistics BOLs the load's PO # is the doc's Order Number,
+  // not the printed "PO #" field. Use Order Number; fall back to PO # if absent.
+  const poVal = header.order || header.po || '';
+  return { order:header.order||'', po:poVal, multiPo:false, pos:poVal?[poVal]:[],
            header:{receiver:'', invoice:'', truck:header.truck||''}, rows:lines, source:'pdf',
            recon:{palletQty:header.palletQty, totalCases:header.totalCases, detected:detected}, createdAt:0 };
 }
@@ -6060,7 +6137,7 @@ function _elxImport(ev){
   const f = ev && ev.target && ev.target.files && ev.target.files[0];
   if (ev && ev.target) ev.target.value='';
   if (!f) return;
-  if (/\.pdf$/i.test(f.name)){ _elxImportPdf(f); return; }
+  if (/\.pdf$/i.test(f.name)){ _elxRoutePdf(f); return; }
   const rd = new FileReader();
   rd.onload = function(e){
     try {
@@ -6151,6 +6228,8 @@ function _elxCell(idx, ri, field, value, opts){
   return '<input id="elx-'+field+'-'+idx+'-'+ri+'" value="'+esc+'"'
     +' oninput="_elxEdit('+idx+','+ri+',\''+field+'\',this.value,false)"'
     +' onchange="_elxEdit('+idx+','+ri+',\''+field+'\',this.value,true)"'
+    +' onfocus="window._elxEditing=true" onblur="_elxCellBlur()"'
+    +' onkeydown="_elxCellKey(event,'+idx+','+ri+',\''+field+'\')"'
     +' spellcheck="false" autocomplete="off"'
     +' style="width:'+w+';box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:2px 5px;color:var(--text);font-family:var(--font);font-size:10px;text-align:'+align+';outline:none">';
 }
@@ -6162,6 +6241,34 @@ function _elxEdit(idx, ri, field, val, commit){
   if(field==='sku') row.unknownSku = !_elxMaster(String(val==null?'':val).trim());
   _elxUpdateTotals(idx);
   if(commit){ try{ _ediSaveEDI(); }catch(e){} }
+}
+// Keep the grid stable while editing: hold the editing guard until focus truly
+// leaves the grid (not just hops to the next cell). The Firebase listener checks
+// window._elxEditing and skips re-rendering while it's set — so nothing jumps/closes.
+function _elxCellBlur(){
+  setTimeout(function(){
+    const a=document.activeElement;
+    if(!(a && a.id && /^elx-(sku|productId|lot|pcs|net|gross)-\d+-\d+$/.test(a.id))) window._elxEditing=false;
+  },150);
+}
+const _ELX_FIELDS=['sku','productId','lot','pcs','net','gross'];
+// Deterministic keyboard nav: Tab / Shift+Tab move across cells (wrapping row to
+// row), Enter / Shift+Enter move down/up the same column. Delete buttons are
+// skipped (tabindex -1), so the flow stays inside the editable cells.
+function _elxCellKey(e, idx, ri, field){
+  if(e.key!=='Tab' && e.key!=='Enter') return;
+  const load=(window._elxLoads||[])[idx]; if(!load) return;
+  const rows=load.rows||[]; const nf=_ELX_FIELDS.length;
+  const fi=_ELX_FIELDS.indexOf(field); if(fi<0) return;
+  function focusCell(r,f){ const t=document.getElementById('elx-'+_ELX_FIELDS[f]+'-'+idx+'-'+r); if(t){ t.focus(); if(t.select)t.select(); } }
+  let r=ri, f=fi;
+  if(e.key==='Tab'){ f=fi+(e.shiftKey?-1:1);
+    if(f>=nf){ f=0; r=ri+1; } if(f<0){ f=nf-1; r=ri-1; }
+  } else { r=ri+(e.shiftKey?-1:1); }
+  if(r<0||r>=rows.length) return;   // let Tab leave the grid naturally at the edges
+  e.preventDefault();
+  window._elxEditing=true;
+  focusCell(r,f);
 }
 function _elxUpdateTotals(idx){
   const load=(window._elxLoads||[])[idx]; if(!load) return;
@@ -6191,6 +6298,7 @@ function renderElxLoads(){
   }
   const G='#2e7d32';
   const loadsHtml = loads.map(function(load, idx){
+    if(load.source==='delbravo') return _elxRenderDelBravo(idx, load);
     const rows = load.rows || [];
     const detailId = 'elx-detail-'+idx;
     const unknown = rows.filter(function(r){return r.unknownSku;}).length;
@@ -6241,6 +6349,202 @@ function renderElxLoads(){
       +'</div></div>';
   }).join('');
   host.innerHTML = summaryHtml + loadsHtml;
+}
+
+// ═══ ELECTROLIT · DEL BRAVO HOUSE BILL OF LADING (multi-PO) ══════════════════
+// Additive PDF path: a Del Bravo BOL lists several lot lines, each with its own
+// #Inv/#Fac (= PO). It imports as ONE editable *staging* load (one row per BOL
+// line: SKU · Lot · PO(#Inv) · Cases · Exp). You verify the lines, then "Split by
+// PO" explodes each line into pallets (Cases ÷ cases-per-pallet from the master)
+// and builds one normal Electrolit load per PO — sharing the header attributes
+// (Order #, Truck, Receiver). The existing Source Logistics BOL path is untouched.
+
+// Detect a Del Bravo BOL (digital text layer first; OCR page 1 only if scanned).
+async function _elxIsDelBravo(buf){
+  try{
+    const pdfjsLib=await ensurePdfJs();
+    const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+    const tc=await (await pdf.getPage(1)).getTextContent();
+    const txt=tc.items.map(function(it){return it.str;}).join(' ');
+    const KW=/DEL BRAVO|HOUSE BILL OF LADING|CADUCIDAD|#\s*Fac|Peso Tarimas|Cantidad|Tipo de bulto/i;
+    if(txt.trim()) return KW.test(txt);
+    // scanned — quick page-1 OCR at a few orientations
+    const worker=await _ediTimeout(ediEnsureTesseract(),120000,'OCR engine load');
+    const page=await pdf.getPage(1);
+    for(const rot of [0,90,270,180]){
+      const vp=page.getViewport({scale:1.6,rotation:rot});
+      const cv=document.createElement('canvas'); cv.width=Math.ceil(vp.width); cv.height=Math.ceil(vp.height);
+      await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
+      try{ const d=await worker.recognize(cv); const t=(d&&d.data&&d.data.text)||''; if(KW.test(t)) return true; if(/\bVersion\b|Pallet\s*Qty|Total\s*Cases/i.test(t)) return false; }catch(e){}
+    }
+    return false;
+  }catch(e){ return false; }
+}
+// Route a dropped PDF: Del Bravo -> staging importer; otherwise the existing BOL path.
+async function _elxRoutePdf(f){
+  let db=false;
+  try{ db=await _elxIsDelBravo(await f.arrayBuffer()); }catch(e){}
+  if(db){ return _elxDelBravoImport(await f.arrayBuffer(), f.name); }
+  return _elxImportPdf(f);
+}
+// OCR every page to text lines, auto-correcting a sideways/upside-down scan.
+async function _elxDelBravoOcr(buf){
+  const pdfjsLib=await ensurePdfJs();
+  const worker=await _ediTimeout(ediEnsureTesseract(),120000,'OCR engine load');
+  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+  const N=pdf.numPages||1; const allLines=[];
+  const canvasAt=async function(page,scale){ const vp=page.getViewport({scale:scale}); const cv=document.createElement('canvas'); cv.width=Math.ceil(vp.width); cv.height=Math.ceil(vp.height); await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise; return cv; };
+  const recFull=async function(cv){ try{ return (await worker.recognize(cv,{},{tsv:true,blocks:true})).data; }catch(e){ return null; } };
+  const hasT=function(ws){ return ws.some(function(w){ return /^40\d{5}$/.test(w.s)||/CASES/i.test(w.s)||/CADUCIDAD|LADING|Cantidad/i.test(w.s); }); };
+  for(let i=1;i<=N;i++){
+    showAlert('Del Bravo BOL OCR — page '+i+' of '+N+'…','info');
+    let base=await canvasAt(await pdf.getPage(i),3);
+    let words=_elxWordsFromOcr(await recFull(_elxBinarize(base,185)));
+    if(!hasT(words)){ const cand=[90,270,180]; for(let a=0;a<cand.length;a++){ const rb=_elxRotateCanvas(base,cand[a]); const rw=_elxWordsFromOcr(await recFull(_elxBinarize(rb,185))); if(hasT(rw)){ base=rb; words=rw; break; } } }
+    _elxOcrLines(words).forEach(function(l){ allLines.push(l); });
+  }
+  return allLines;
+}
+// Parse Del Bravo text lines -> header + line items (best-effort; user verifies).
+function _elxDelBravoParse(lines){
+  const blob=(lines||[]).join('\n');
+  function f(re){ const m=blob.match(re); return m?m[1]:''; }
+  const order = f(/ORDER\s*#\s*(\d{4,})/i) || f(/Order\s*Number[^0-9]{0,10}(\d{4,})/i) || f(/BOL\s*#?\s*(\d{4,})/i);
+  const truck = f(/Trailer\s*(?:No\.?)?[^0-9A-Za-z]{0,6}([A-Za-z0-9]{3,})/i);
+  const palletQty = parseInt(f(/(?:Quantity of\s*pale?ts|Cantidad de\s*tarimas)[^0-9]{0,8}(\d{1,4})/i)||'0',10)||0;
+  const items=[];
+  (lines||[]).forEach(function(l){
+    const im=String(l).match(/\b(40\d{5})\b/); if(!im) return;
+    const snap=_elxSnapSku(im[1]);
+    const exp=(l.match(/\b(\d{2}\/\d{2}\/\d{2,4})\b/)||[])[1]||'';
+    // #Inv / #Fac: an 8-digit token (not the 12-digit barcode, not the 7-digit item#)
+    let inv=''; const invm=l.match(/\b(\d{8})\b/g); if(invm){ inv=invm.find(function(x){return x!==im[1];})||invm[0]; }
+    // Lot: an alphanumeric token with an interior letter (e.g. D26J729B)
+    let lot=''; const lm=l.match(/\b([A-Z]?\d{2}[A-Z]\d{3,4}[A-Z]?)\b/i); if(lm) lot=lm[1].toUpperCase();
+    // Cases (Cantidad): the number printed right after "CASES"
+    let cases=0; const cm=l.match(/CASES[^0-9]*([\d,]+(?:\.\d+)?)/i); if(cm) cases=Math.round(parseFloat(cm[1].replace(/,/g,''))||0);
+    items.push({ sku:snap.sku, unknownSku:snap.unknown, lot:lot, inv:inv, cases:cases, exp:exp });
+  });
+  return { order:order, truck:truck, palletQty:palletQty, items:items };
+}
+// Build the editable staging load (one row per BOL line; NOT yet exploded).
+function _elxBuildDelBravo(parsed, fileName){
+  const rows=(parsed.items||[]).map(function(it){
+    const m=_elxMaster(it.sku);
+    return { sku:it.sku, productId:(m&&m[0])?m[0]:'', lot:it.lot, po:it.inv, cases:it.cases,
+             expDate:it.exp, cpp:(m&&m[3]!=null)?m[3]:'', net:(m&&m[1]!=null)?m[1]:'', gross:(m&&m[2]!=null)?m[2]:'', unknownSku:!m };
+  });
+  let est=0; rows.forEach(function(r){ const c=parseFloat(r.cpp)||0, ca=parseFloat(r.cases)||0; if(c&&ca) est+=Math.round(ca/c); });
+  return { order:parsed.order||'', po:'', source:'delbravo',
+    header:{ receiver:'', invoice:'', truck:parsed.truck||'' },
+    rows:rows, recon:{ palletQty:parsed.palletQty||0, estPallets:est }, createdAt:0 };
+}
+async function _elxDelBravoImport(buf, fileName){
+  try{
+    showAlert('Reading Del Bravo BOL (OCR — first run downloads the engine, give it a moment)…','info');
+    const lines=await _elxDelBravoOcr(buf);
+    const parsed=_elxDelBravoParse(lines);
+    if(!parsed.items.length){ showAlert('Del Bravo: no line items (40xxxxx) found in '+fileName+' — check scan quality.','danger'); return; }
+    const load=_elxBuildDelBravo(parsed, fileName); load.fileName=fileName;
+    _ediStampLoad(load); load.createdAt=Date.now();
+    window._elxLoads=window._elxLoads||[]; window._elxLoads.push(load);
+    _ediSave(); showEdi();
+    if(typeof _ediReopenDetail==='function') _ediReopenDetail('elx-detail-'+(window._elxLoads.length-1));
+    const pos=[]; parsed.items.forEach(function(it){ const p=String(it.inv||'').trim(); if(p&&pos.indexOf(p)<0)pos.push(p); });
+    showAlert('✓ Del Bravo BOL '+fileName+' · Order '+(parsed.order||'?')+' — '+parsed.items.length+' line(s) · ~'+load.recon.estPallets+' pallets'+(parsed.palletQty?(' (printed '+parsed.palletQty+')'):'')+' · '+pos.length+' PO(s). ⚠ Verify PO#, Lot & Cases, then Split by PO.','warning');
+  }catch(err){ console.error(err); showAlert('Del Bravo OCR failed — '+((err&&err.message)||err),'danger'); }
+}
+// Per-row PO / Cases edits on the staging load (persist to model; no re-render jump).
+function _elxDbSet(idx, ri, field, val){
+  const load=(window._elxLoads||[])[idx]; if(!load||!load.rows||!load.rows[ri]) return;
+  const r=load.rows[ri];
+  r[field] = (field==='cases') ? (_ediNum(val)===''?'':(parseFloat(String(val).replace(/,/g,''))||0)) : val;
+  // On SKU entry, pull Product ID + weights from the master (model only — the display
+  // refreshes on blur via onchange, so typing is never interrupted mid-keystroke).
+  if(field==='sku'){ const m=_elxMaster(String(val==null?'':val).trim());
+    r.unknownSku=!m; r.productId=(m&&m[0])?m[0]:''; r.cpp=(m&&m[3]!=null)?m[3]:''; r.net=(m&&m[1]!=null)?m[1]:''; r.gross=(m&&m[2]!=null)?m[2]:''; }
+  try{ _ediSave(); }catch(e){}
+}
+// Refresh the staging display (Product ID / Pallets / Split count) after an edit
+// commits (blur), without interrupting typing. Guarded so it only fires for staging.
+function _elxDbRefresh(idx){ const load=(window._elxLoads||[])[idx]; if(!load||load.source!=='delbravo') return; showEdi(); if(typeof _ediReopenDetail==='function') _ediReopenDetail('elx-detail-'+idx); }
+function _elxDbAddRow(idx){
+  const load=(window._elxLoads||[])[idx]; if(!load||load.source!=='delbravo') return; load.rows=load.rows||[];
+  load.rows.push({ sku:'', productId:'', lot:'', po:'', cases:'', expDate:'', cpp:'', net:'', gross:'', unknownSku:false });
+  _ediSave(); showEdi(); if(typeof _ediReopenDetail==='function') _ediReopenDetail('elx-detail-'+idx);
+}
+// Split the staging load into one normal Electrolit load per PO (#Inv), exploding
+// each line's Cases into pallets. Shared header attributes carry to every load.
+function _elxDelBravoSplit(idx){
+  const load=(window._elxLoads||[])[idx]; if(!load||load.source!=='delbravo') return;
+  const H=load.header||{};
+  const groups={}, order=[];
+  (load.rows||[]).forEach(function(r){ const p=String(r.po||'').trim()||'(no PO)'; if(!(p in groups)){ groups[p]=[]; order.push(p); } groups[p].push(r); });
+  if(!order.length){ showAlert('Del Bravo: nothing to split.','warning'); return; }
+  const newLoads=order.map(function(p){
+    const lines=[];
+    groups[p].forEach(function(r){
+      const m=_elxMaster(r.sku); const cpp=parseFloat(r.cpp)||(m&&m[3])||0; const ca=parseFloat(r.cases)||0;
+      const n=(cpp&&ca)?Math.round(ca/cpp):0;
+      const line={ sku:r.sku, productId:r.productId||((m&&m[0])?m[0]:''), lot:r.lot,
+        pcs:(cpp||''), net:(r.net===''?'':r.net), gross:(r.gross===''?'':r.gross), expDate:r.expDate||'', unknownSku:!m };
+      const reps=n>0?n:1;                          // at least one line if cases/master missing
+      for(let k=0;k<reps;k++) lines.push(Object.assign({}, line));
+    });
+    return { order:load.order||'', po:(p==='(no PO)'?'':p), multiPo:false, pos:(p==='(no PO)'?[]:[p]),
+      header:{ receiver:H.receiver||'', invoice:H.invoice||'', truck:H.truck||'' },
+      rows:lines, source:'pdf', recon:{ palletQty:lines.length, detected:lines.length }, createdAt:Date.now() };
+  });
+  newLoads.forEach(_ediStampLoad);
+  Array.prototype.splice.apply(window._elxLoads, [idx,1].concat(newLoads));
+  _ediSave(); showEdi();
+  const totalP=newLoads.reduce(function(s,l){return s+l.rows.length;},0);
+  showAlert('✓ Split into '+newLoads.length+' load(s) by PO ('+order.filter(function(p){return p!=='(no PO)';}).join(', ')+') · '+totalP+' pallets total.','success');
+}
+// Dedicated render for a Del Bravo staging load (line items + Split by PO).
+function _elxRenderDelBravo(idx, load){
+  const G='#2e7d32'; const rows=load.rows||[]; const H=load.header||{}; const detailId='elx-detail-'+idx;
+  const hin=function(key,label,val){ return '<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:9px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">'+label+'</label>'
+    +'<input id="elx-hdr-'+key+'-'+idx+'" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" oninput="_elxHdr('+idx+',&quot;'+key+'&quot;,this.value)" style="padding:4px 7px;border:1.5px solid '+G+';border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--bg);color:var(--text);outline:none;width:120px"></div>'; };
+  const pos=[]; rows.forEach(function(r){ const p=String(r.po||'').trim(); if(p&&pos.indexOf(p)<0)pos.push(p); });
+  let est=0; rows.forEach(function(r){ const c=parseFloat(r.cpp)||0, ca=parseFloat(r.cases)||0; if(c&&ca) est+=Math.round(ca/c); });
+  const printed=(load.recon&&load.recon.palletQty)||0;
+  const mismatch=printed && est!==printed;
+  const cell=function(ri,field,val,opts){ opts=opts||{}; const esc=String(val==null?'':val).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+    // id starts with "elx-" and sets window._elxEditing so the Firebase echo does NOT
+    // re-render mid-edit (otherwise a keystroke interrupts typing and truncates the PO).
+    return '<input id="elx-db-'+field+'-'+idx+'-'+ri+'" value="'+esc+'" oninput="_elxDbSet('+idx+','+ri+',\''+field+'\',this.value)" onchange="_elxDbRefresh('+idx+')" onfocus="window._elxEditing=true" onblur="_elxCellBlur()" spellcheck="false" autocomplete="off" style="width:'+(opts.width||'100%')+';box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:2px 5px;color:var(--text);font-family:var(--font);font-size:10px;text-align:'+(opts.num?'right':'left')+';outline:none">'; };
+  const drows=rows.map(function(r, ri){
+    const bg=ri%2!==0?'rgba(0,0,0,0.03)':''; const skuBg=r.unknownSku?';background:rgba(185,28,28,0.10)':'';
+    const cpp=parseFloat(r.cpp)||0, ca=parseFloat(r.cases)||0; const pl=(cpp&&ca)?Math.round(ca/cpp):0;
+    return '<tr style="background:'+bg+';border-bottom:1px solid var(--border)">'
+      +'<td style="padding:3px 6px'+skuBg+'">'+cell(ri,'sku',r.sku,{width:'80px'})+'</td>'
+      +'<td style="padding:3px 6px">'+cell(ri,'productId',r.productId,{width:'160px'})+'</td>'
+      +'<td style="padding:3px 6px">'+cell(ri,'lot',r.lot,{width:'100px'})+'</td>'
+      +'<td style="padding:3px 6px">'+cell(ri,'po',r.po,{width:'100px'})+'</td>'
+      +'<td style="padding:3px 6px">'+cell(ri,'cases',r.cases,{num:true,width:'70px'})+'</td>'
+      +'<td style="padding:3px 6px;text-align:right;color:var(--text2)">'+(pl||'—')+'</td>'
+      +'<td style="padding:3px 6px">'+cell(ri,'expDate',r.expDate,{width:'90px'})+'</td>'
+      +'<td style="padding:3px 6px;text-align:center"><button onclick="_elxDeleteRow('+idx+','+ri+')" tabindex="-1" title="Delete line" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:0 3px">✕</button></td></tr>';
+  }).join('');
+  return '<div class="ticket-form" style="margin-bottom:10px;padding:0;overflow:hidden;border:1.5px solid '+G+'">'
+    +'<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface);flex-wrap:wrap">'
+      +'<div style="flex:1;min-width:190px"><div style="font-weight:bold;color:'+G+';font-size:13px;white-space:nowrap">Del Bravo BOL · Order '+(load.order||'—')+'</div>'
+        +'<div style="font-size:10px;color:var(--warning)">📄 staging · '+rows.length+' line(s) · '+pos.length+' PO(s) · ~'+est+' pallets'+(printed?(' / printed '+printed+(mismatch?' ⚠':' ✓')):'')+' — verify then Split</div></div>'
+      +'<div style="display:flex;gap:6px;flex-wrap:wrap">'+hin('receiver','Receiver',H.receiver)+hin('truck','Truck #',H.truck)+'</div>'
+      +'<button onclick="_elxDbAddRow('+idx+')" title="Add a blank line" style="background:none;border:1.5px solid '+G+';color:'+G+';border-radius:5px;padding:6px 12px;cursor:pointer;font-size:11px;font-weight:700">+ Add Line</button>'
+      +'<button onclick="_elxDelBravoSplit('+idx+')" title="Create one Electrolit load per PO" style="background:'+G+';color:#fff;border:none;border-radius:5px;padding:6px 14px;cursor:pointer;font-size:11px;font-weight:700">Split by PO ('+pos.length+')</button>'
+      +'<button onclick="_elxDeleteLoad('+idx+')" title="Remove" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;padding:2px 4px">✕</button>'
+      +'<button id="'+detailId+'-btn" onclick="toggleEDIDetail(&quot;'+detailId+'&quot;)" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;font-size:11px;padding:2px 8px">▼</button>'
+    +'</div>'
+    +'<div id="'+detailId+'" style="display:block;border-top:1px solid var(--border);overflow-x:auto;max-height:360px;overflow-y:auto">'
+      +'<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--surface2)">'
+        +'<th style="padding:5px 6px;text-align:left;color:var(--text2)">SKU</th><th style="padding:5px 6px;text-align:left;color:var(--text2)">PRODUCT ID</th>'
+        +'<th style="padding:5px 6px;text-align:left;color:var(--text2)">LOT #</th><th style="padding:5px 6px;text-align:left;color:var(--text2)">PO # (#Inv)</th>'
+        +'<th style="padding:5px 6px;text-align:right;color:var(--text2)">CASES</th><th style="padding:5px 6px;text-align:right;color:var(--text2)">PALLETS</th>'
+        +'<th style="padding:5px 6px;text-align:left;color:var(--text2)">EXP DATE</th><th style="width:24px"></th>'
+      +'</tr></thead><tbody>'+drows+'</tbody></table>'
+    +'</div></div>';
 }
 // ═══ END EDI SUBSYSTEM ════════════════════════════════════════════════════════
 
