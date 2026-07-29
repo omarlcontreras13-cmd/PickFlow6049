@@ -326,7 +326,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 43;
+const APP_BUILD = 45;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -866,6 +866,7 @@ function viewArchivedTicket(id) {
           <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">DATE</div><div style="font-size:13px">${fmtDate}</div></div>
           <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">CLERK</div><div style="font-size:13px">${ticket.creator||'—'}</div></div>
           <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">ORDER #</div><div style="font-size:13px;color:var(--accent);font-weight:bold">${ticket.orderNum||'—'}</div></div>
+          <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">WMS ORDER #</div><div style="font-size:13px;color:var(--accent);font-weight:bold">${ticket.wmsOrder||'—'}</div></div>
           <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">PICKER</div><div style="font-size:13px">${ticket.picker||'—'}</div></div>
           <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">DESTINATION</div><div style="font-size:13px">${ticket.dest||'—'}</div></div>
           <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">APPT.</div><div style="font-size:13px">${ticket.appt ? new Date('1970-01-01T'+ticket.appt).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '—'}</div></div>
@@ -2083,6 +2084,7 @@ function showDashboard() {
           <div style="display:flex;justify-content:space-between;align-items:center">
             <div>
               <div style="font-size:14px;color:var(--accent);letter-spacing:1px">${t.id}${t.orderNum?' <span style="color:var(--text2);font-size:11px">· #'+t.orderNum+'</span>':''}</div>
+              ${t.wmsOrder?`<div style="font-size:11px;color:var(--text2);margin-top:2px">WMS Order #: <strong style="color:var(--text)">${t.wmsOrder}</strong></div>`:''}
               <div style="font-size:12px;color:var(--text);margin-top:4px">${t.dest||'No destination'}</div>
               <div style="font-size:11px;color:var(--text2);margin-top:2px">${t.creator}${t.appt?' · Appt: '+t.appt:''} · ${new Date(t.created).toLocaleDateString()}</div>
             </div>
@@ -2108,6 +2110,7 @@ function showNewTicket() {
           <div class="form-group"><label>DATE</label><input type="date" id="nd-date" value="${today}"></div>
           <div class="form-group"><label>CLERK *</label><input type="text" id="nd-clerk" placeholder="Your name" value="${state.currentUser ? state.currentUser.name : ''}" autofocus></div>
           <div class="form-group"><label>ORDER #</label><input type="text" id="nd-order" placeholder="e.g. 80070981"></div>
+          <div class="form-group"><label>WMS ORDER #</label><input type="text" id="nd-wms" placeholder="WMS order number"></div>
           <div class="form-group"><label>PICKER</label><input type="text" id="nd-picker" placeholder="Picker name"></div>
           <div class="form-group"><label>CUSTOMER</label><input type="text" id="nd-customer" placeholder="e.g. Electrolit"></div>
           <div class="form-group"><label>DESTINATION</label><input type="text" id="nd-dest" placeholder="e.g. Canada Dry Delaware"></div>
@@ -2188,6 +2191,7 @@ function createTicket() {
     creator: clerk,
     ticketDate: document.getElementById('nd-date').value,
     orderNum: document.getElementById('nd-order').value.trim(),
+    wmsOrder: (document.getElementById('nd-wms')?document.getElementById('nd-wms').value.trim():''),
     picker: document.getElementById('nd-picker').value.trim(),
     customer: document.getElementById('nd-customer').value.trim(),
     dest: document.getElementById('nd-dest').value.trim(),
@@ -2239,6 +2243,7 @@ function viewTicket(id) {
         <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">DATE</div><div style="font-size:13px">${fmtDate}</div></div>
         <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">CLERK</div><div style="font-size:13px">${ticket.creator||'—'}</div></div>
         <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">ORDER #</div><div style="font-size:13px;color:var(--accent);font-weight:bold">${ticket.orderNum||'—'}</div></div>
+          <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">WMS ORDER #</div><div style="font-size:13px;color:var(--accent);font-weight:bold">${ticket.wmsOrder||'—'}</div></div>
         ${ticket.po?`<div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">PO #</div><div style="font-size:13px;color:var(--accent);font-weight:bold">${ticket.po}</div></div>`:''}
         <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">PICKER</div><div style="font-size:13px">${ticket.picker||'—'}</div></div>
         <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">CUSTOMER</div><div style="font-size:13px">${ticket.customer||'—'}</div></div>
@@ -2413,6 +2418,7 @@ function editTicket(id) {
           <div class="form-group"><label>DATE</label><input type="date" id="ed-date" value="${t.ticketDate||''}"></div>
           <div class="form-group"><label>CLERK</label><input type="text" id="ed-clerk" value="${t.creator||''}"></div>
           <div class="form-group"><label>ORDER #</label><input type="text" id="ed-order" value="${t.orderNum||''}"></div>
+          <div class="form-group"><label>WMS ORDER #</label><input type="text" id="ed-wms" value="${t.wmsOrder||''}"></div>
           <div class="form-group"><label>PICKER</label><input type="text" id="ed-picker" value="${t.picker||''}"></div>
           <div class="form-group"><label>CUSTOMER</label><input type="text" id="ed-customer" value="${t.customer||''}"></div>
           <div class="form-group"><label>DESTINATION</label><input type="text" id="ed-dest" value="${t.dest||''}"></div>
@@ -2439,6 +2445,7 @@ function saveEdit(id) {
   t.ticketDate=document.getElementById('ed-date').value;
   t.creator=document.getElementById('ed-clerk').value.trim();
   t.orderNum=document.getElementById('ed-order').value.trim();
+  t.wmsOrder=(document.getElementById('ed-wms')?document.getElementById('ed-wms').value.trim():(t.wmsOrder||''));
   t.picker=document.getElementById('ed-picker').value.trim();
   t.customer=document.getElementById('ed-customer').value.trim();
   t.dest=document.getElementById('ed-dest').value.trim();
@@ -2515,7 +2522,7 @@ function exportPickTicketWord(id, fromArchive=false) {
   const _fmtAppt = ticket.appt ? new Date('1970-01-01T'+ticket.appt).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '—';
   const _fmtPickup = ticket.pickupDate ? new Date(ticket.pickupDate+'T00:00:00').toLocaleDateString() : '—';
   doc.text(fmtDate,                                    margin+22, hY+7);
-  doc.text((ticket.orderNum||'—') + (ticket.po?'    ·    PO# '+ticket.po:''),     margin+22, hY+17);
+  doc.text((ticket.orderNum||'—') + (ticket.po?'    ·    PO# '+ticket.po:'') + (ticket.wmsOrder?'    ·    WMS Order # '+ticket.wmsOrder:''),     margin+22, hY+17);
   doc.text((ticket.customer||'—').substring(0,35),     margin+22, hY+27);
   doc.text(_fmtAppt,                                   margin+22, hY+37);
   doc.text(ticket.creator||'—',                        col2+22,   hY+7);
