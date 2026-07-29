@@ -326,7 +326,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 37;
+const APP_BUILD = 43;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -746,6 +746,7 @@ function archiveTicket(id, silent=false) {
   if (!isAdmin()) { showAlert('Only admins can archive tickets.', 'warning'); return; }
   const ticket = state.tickets.find(t => t.id === id);
   if (!ticket) return;
+  if (typeof ticketStageInfo==='function' && ticketStageInfo(ticket).label!=='PRINTED') { if(!silent) showAlert('This ticket is still in CREATED status — print the pick ticket before archiving.', 'warning'); return; }
   if (!silent && !confirm('Archive this pick ticket?')) return;
   ticket.archivedAt = Date.now();
   ticket.archivedBy = state.currentUser ? state.currentUser.name : 'System';
@@ -753,7 +754,7 @@ function archiveTicket(id, silent=false) {
   state.tickets = state.tickets.filter(t => t.id !== id);
   if (state.activeTicket === id) { state.activeTicket = null; }
   // Purge tickets older than 90 days
-  const cutoff = Date.now() - (90 * 24 * 60 * 60 * 1000);
+  const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
   state.archivedTickets = state.archivedTickets.filter(t => t.archivedAt > cutoff);
   saveState();
   syncArchiveToFirebase();
@@ -762,18 +763,34 @@ function archiveTicket(id, silent=false) {
   if (!silent) showAlert('✓ Ticket archived.', 'success');
 }
 
+// ── REVERSE PRINT (additive) — undo a print flag set in error; reverts to CREATED ──
+function unprintTicket(id){
+  if (!isAdmin()) { showAlert('Only admins can reverse a print flag.', 'warning'); return; }
+  const ticket = state.tickets.find(t => t.id === id); if (!ticket) return;
+  if (typeof ticketStageInfo==='function' && ticketStageInfo(ticket).label!=='PRINTED') { showAlert('This ticket is not marked printed.', 'warning'); return; }
+  if (!confirm('Reverse the PRINTED flag on '+id+' back to CREATED? Use this only if it was printed in error.')) return;
+  delete ticket.status;
+  if (ticket.stamps) delete ticket.stamps.printed;
+  saveState(); updateTicketList();
+  if (state.activeTicket===id) viewTicket(id); else showDashboard();
+  showAlert('Print flag reversed — '+id+' is back to CREATED.', 'success');
+}
+
 function archiveAll(silent=false) {
   if (!isAdmin()) { showAlert('Only admins can archive tickets.', 'warning'); return; }
   if (!silent && !confirm('Archive ALL open tickets?')) return;
-  const count = state.tickets.length;
-  state.tickets.forEach(t => {
+  // Only PRINTED tickets archive; CREATED (un-printed) tickets stay on the main screen.
+  const _toArchive = state.tickets.filter(function(t){ return (typeof ticketStageInfo==='function') ? ticketStageInfo(t).label==='PRINTED' : true; });
+  const _keep = state.tickets.filter(function(t){ return (typeof ticketStageInfo==='function') ? ticketStageInfo(t).label!=='PRINTED' : false; });
+  const count = _toArchive.length;
+  _toArchive.forEach(t => {
     t.archivedAt = Date.now();
     t.archivedBy = state.currentUser ? state.currentUser.name : 'EOD Auto';
     state.archivedTickets.push(t);
   });
-  state.tickets = [];
-  state.activeTicket = null;
-  const cutoff = Date.now() - (90 * 24 * 60 * 60 * 1000);
+  state.tickets = _keep;
+  if (state.activeTicket && !_keep.some(function(t){return t.id===state.activeTicket;})) state.activeTicket = null;
+  const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
   state.archivedTickets = state.archivedTickets.filter(t => t.archivedAt > cutoff);
   saveState();
   syncArchiveToFirebase();
@@ -805,8 +822,9 @@ function renderArchiveList(filterDate='') {
   }
   // Group by date
   const groups = {};
-  [...state.archivedTickets].sort((a,b) => b.archivedAt - a.archivedAt).forEach(t => {
-    const d = new Date(t.archivedAt).toLocaleDateString();
+  const _cdOf=(t)=> t.created || (t.ticketDate ? Date.parse(t.ticketDate+'T00:00:00') : (t.archivedAt||0));   // file by CREATION date
+  [...state.archivedTickets].sort((a,b) => _cdOf(b) - _cdOf(a)).forEach(t => {
+    const d = new Date(_cdOf(t)).toLocaleDateString();
     if (!groups[d]) groups[d] = [];
     groups[d].push(t);
   });
@@ -2069,7 +2087,7 @@ function showDashboard() {
               <div style="font-size:11px;color:var(--text2);margin-top:2px">${t.creator}${t.appt?' · Appt: '+t.appt:''} · ${new Date(t.created).toLocaleDateString()}</div>
             </div>
             <div style="text-align:right">
-              <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">${ticketStageBadge(t)}<div style="font-size:13px;color:var(--accent2);font-weight:bold">${ticketTotalPcs(t).toLocaleString()} pcs</div></div>
+              <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">${ticketStageBadge(t)}${(isAdmin() && ticketStageInfo(t).label==='PRINTED') ? `<span onclick="event.stopPropagation();unprintTicket('${t.id}')" title="Reverse print — undo the print flag (printed in error)" style="cursor:pointer;color:var(--warning);font-weight:bold;font-size:14px;line-height:1;padding:0 3px;user-select:none">↩</span>` : ''}<div style="font-size:13px;color:var(--accent2);font-weight:bold">${ticketTotalPcs(t).toLocaleString()} pcs</div></div>
               <div style="font-size:11px;color:var(--text2)">${ticketTotalPallets(t)} pallets · ${ticketSkuCount(t)} SKUs</div>
               ${t.picker?`<div style="font-size:11px;color:var(--text2)">Picker: ${t.picker}</div>`:''}
               <div style="font-size:11px;color:var(--text2);margin-top:3px">${ticketStampLine(t)}</div>
