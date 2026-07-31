@@ -326,7 +326,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 45;
+const APP_BUILD = 47;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -5961,7 +5961,7 @@ function _elxExportAoa(load, expDate){
   ];
   rows.forEach(function(r){
     aoa.push([ r.sku, r.productId, r.lot, load.po, load.po, (r.net===''?0:r.net), (r.gross===''?0:r.gross),
-               'SKID', 0, r.pcs, 0, expDate ]);
+               'SKID', 0, r.pcs, 0, (r.expSerial ? r.expSerial : expDate) ]);
   });
   return aoa;
 }
@@ -6215,6 +6215,138 @@ function _elxExport(idx){
   showAlert('✓ Exported EDI_Electrolit_'+fnid+'.xlsx — '+load.rows.length+' lines','success');
 }
 // ── Electrolit screen + render ────────────────────────────────────────────────
+// ═══ LAREDO TRANSFER — routes the scanned COR / Del Bravo BOL PDF to the existing
+// Del Bravo reader (OCR all pages -> parse Material/Exp/Lot/#Inv/Cases -> stage -> Split by PO).
+// Purely a dedicated entry point; the Del Bravo reader logic is unchanged.
+function _larImport(ev){
+  const f=ev&&ev.target&&ev.target.files&&ev.target.files[0]; if(ev&&ev.target) ev.target.value='';
+  if(!f) return;
+  if(!/\.pdf$/i.test(f.name)){ showAlert('Laredo Transfer expects the scanned COR / Del Bravo BOL PDF.','warning'); return; }
+  f.arrayBuffer().then(function(buf){ try{ _elxDelBravoImport(buf, f.name); }catch(e){ showAlert('Laredo import failed — '+((e&&e.message)||e),'danger'); } })
+                 .catch(function(){ showAlert('Could not read the PDF.','danger'); });
+}
+// ═══ WACO PLANT — Electrolit packing-list reader (multi-tab XLSX; 1 load per tab) ═══
+// Batch e.g. "WA26U0102": plant letters, 2-digit year (26->2026), month letter, then lot detail.
+// WACO_MON maps the month letter -> month number (1-12). Left blank until the plant legend is
+// confirmed; an unknown/blank month yields no exp date (export falls back to today, as before).
+const WACO_MON = {};
+function _wacoBatchExp(batch){
+  const str=String(batch==null?'':batch).trim().toUpperCase();
+  const m=str.match(/^[A-Z]{1,3}(\d{2})([A-Z])/);
+  if(!m) return { year:0, month:0, serial:0, label:'' };
+  const year=2000+parseInt(m[1],10);
+  const month=WACO_MON[m[2]]||0;
+  if(!month) return { year:year, month:0, serial:0, label:'' };
+  const serial=Math.round(Date.UTC(year,month-1,1)/86400000)+25569;
+  return { year:year, month:month, serial:serial, label:(month)+'/'+year };
+}
+// Parse a Waco packing-list workbook: each sheet/tab becomes one load.
+function _wacoParse(data){
+  const wb=XLSX.read(data,{type:'array'});
+  const out=[];
+  (wb.SheetNames||[]).forEach(function(sn){
+    const ws=wb.Sheets[sn]; if(!ws) return;
+    const aoa=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+    const cell=function(r,c){ return (aoa[r]&&aoa[r][c]!=null)?aoa[r][c]:''; };
+    function hval(label){
+      for(let r=0;r<Math.min(aoa.length,18);r++){
+        if(String(cell(r,0)).trim().toLowerCase()===label.toLowerCase()) return cell(r,2);
+      }
+      return '';
+    }
+    const custPO=String(hval('Customer PO No.')||sn).trim();
+    const salesOrder=String(hval('Sales Order No.')||'').trim();
+    const packingList=String(hval('Packing List No.')||'').trim();
+    const carrier=String(hval('Carrier')||'').trim();
+    const seal=String(hval('Seal No.')||'').trim();
+    let hr=-1;
+    for(let r=0;r<aoa.length;r++){ if(String(cell(r,0)).trim()==='#' && /handling/i.test(String(cell(r,1)))){ hr=r; break; } }
+    const rows=[];
+    if(hr>=0){
+      for(let r=hr+1;r<aoa.length;r++){
+        const num=String(cell(r,0)).trim();
+        if(!/^\d+$/.test(num)) break;
+        const hu=String(cell(r,1)).trim(), sku=String(cell(r,2)).trim(),
+              desc=String(cell(r,3)).trim(), batch=String(cell(r,4)).trim();
+        if(!sku) continue;
+        rows.push({ handlingUnit:hu, sku:sku, desc:desc, batch:batch });
+      }
+    }
+    out.push({ tab:sn, custPO:custPO, salesOrder:salesOrder, packingList:packingList, carrier:carrier, seal:seal, rows:rows });
+  });
+  return out;
+}
+// Build an _elxLoads entry from one parsed Waco tab (one pallet-row per Handling Unit).
+function _wacoBuildLoad(t){
+  const rows=[];
+  (t.rows||[]).forEach(function(pr){
+    const m=_elxMaster(pr.sku);
+    const productId=(m&&m[0])?m[0]:(pr.desc||'');
+    const net=m?m[1]:'', gross=m?m[2]:'', cases=m?m[3]:'';
+    const exp=_wacoBatchExp(pr.batch);
+    rows.push({ sku:pr.sku, productId:productId, lot:pr.batch, pcs:(cases!=null?cases:0),
+                net:(net==null?'':net), gross:(gross==null?'':gross), entrega:'',
+                skid:pr.handlingUnit, expSerial:exp.serial, expLabel:exp.label, unknownSku:!m });
+  });
+  return { order:t.salesOrder, po:t.custPO, multiPo:false, pos:[t.custPO], supplier:'WACO',
+           header:{ receiver:'ELECTROLIT', invoice:t.custPO, truck:'' },
+           waco:{ packingList:t.packingList, carrier:t.carrier, seal:t.seal },
+           rows:rows, createdAt:0 };
+}
+function _wacoImport(ev){
+  const f=ev&&ev.target&&ev.target.files&&ev.target.files[0]; if(ev&&ev.target) ev.target.value='';
+  if(!f) return;
+  const rd=new FileReader();
+  rd.onload=function(e){
+    try{
+      const parsed=_wacoParse(new Uint8Array(e.target.result));
+      const good=parsed.filter(function(t){ return t.rows&&t.rows.length; });
+      if(!good.length){ showAlert('No Waco packing-list tabs with pallet rows found in '+f.name+'.','danger'); return; }
+      window._wacoStage={ fileName:f.name, tabs:good };
+      showAlert('✓ Read '+f.name+' — '+good.length+' load tab(s). Review below.','success');
+      if(state.currentView==='edi') showEdi();
+    }catch(err){ console.error(err); showAlert('Waco import failed — '+((err&&err.message)||err),'danger'); }
+  };
+  rd.onerror=function(){ showAlert('Could not read the file.','danger'); };
+  rd.readAsArrayBuffer(f);
+}
+function _wacoRenderStage(){
+  const host=document.getElementById('waco-stage'); if(!host) return;
+  const st=window._wacoStage;
+  if(!st||!st.tabs||!st.tabs.length){ host.innerHTML=''; return; }
+  let h='<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">';
+  h+='<div style="font-size:11px;color:var(--text2);margin-bottom:6px">Review — '+st.fileName+' · '+st.tabs.length+' load(s):</div>';
+  st.tabs.forEach(function(t){
+    const skus={}, lots={}; let unk=0;
+    (t.rows||[]).forEach(function(r){ skus[r.sku]=1; lots[r.batch]=1; if(!_elxMaster(r.sku)) unk++; });
+    const exp=_wacoBatchExp((t.rows[0]||{}).batch);
+    h+='<div style="font-size:11px;padding:6px 9px;border:1px solid var(--border);border-radius:6px;margin-bottom:5px">'
+      +'<strong style="color:var(--accent)">'+t.tab+'</strong> · PO '+t.custPO+' · Order '+(t.salesOrder||'—')
+      +' · '+t.rows.length+' pallets · SKU '+Object.keys(skus).join(', ')
+      +' · Batch '+Object.keys(lots).join(', ')
+      +' · Exp '+(exp.label||'—')
+      +(unk?(' · <span style="color:var(--warning)">⚠ '+unk+' unknown SKU</span>'):'')
+      +'</div>';
+  });
+  h+='<button class="btn btn-primary" onclick="_wacoCommitAll()">✓ Create '+st.tabs.length+' Load(s)</button>';
+  h+=' <button class="btn" onclick="window._wacoStage=null;showEdi()">Cancel</button>';
+  h+='</div>';
+  host.innerHTML=h;
+}
+function _wacoCommitAll(){
+  const st=window._wacoStage; if(!st||!st.tabs) return;
+  let n=0;
+  st.tabs.forEach(function(t){
+    const load=_wacoBuildLoad(t);
+    try{ _ediStampLoad(load); }catch(e){}
+    load.createdAt=Date.now();
+    window._elxLoads=window._elxLoads||[]; window._elxLoads.push(load); n++;
+  });
+  window._wacoStage=null;
+  try{ _ediSave(); }catch(e){}
+  showEdi();
+  showAlert('✓ Created '+n+' Waco load(s).','success');
+}
 function showEdi(){
   state.currentView = 'edi';
   const src = window._elxSrc;
@@ -6244,8 +6376,26 @@ function showEdi(){
       </div>
       <div style="font-size:11px;margin-top:8px">${srcLine}</div>
     </div>
+    <div class="ticket-form" style="margin-bottom:14px;border:1px solid var(--accent)">
+      <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent);margin-bottom:6px">🏭 WACO PLANT — Packing List (multi-tab XLSX · one load per tab)</div>
+      <div id="waco-drop" ondragover="event.preventDefault();this.style.borderColor='#2e7d32'" ondragleave="this.style.borderColor=''" ondrop="event.preventDefault();this.style.borderColor='';_wacoImport({target:{files:event.dataTransfer.files}})" onclick="document.getElementById('waco-file-input').click()"
+           style="border:1.5px dashed var(--border);border-radius:6px;padding:12px;text-align:center;color:var(--text2);cursor:pointer;font-size:12px">
+        Drop or click to import the Waco packing-list workbook — each tab becomes one Electrolit load
+      </div>
+      <input type="file" id="waco-file-input" accept=".xlsx,.xls" style="display:none" onchange="_wacoImport(event)">
+      <div id="waco-stage"></div>
+    </div>
+    <div class="ticket-form" style="margin-bottom:14px;border:1px solid var(--accent)">
+      <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent);margin-bottom:6px">🚛 LAREDO TRANSFER — Del Bravo COR / BOL (scanned PDF · OCR)</div>
+      <div id="lar-drop" ondragover="event.preventDefault();this.style.borderColor='#2e7d32'" ondragleave="this.style.borderColor=''" ondrop="event.preventDefault();this.style.borderColor='';_larImport({target:{files:event.dataTransfer.files}})" onclick="document.getElementById('lar-file-input').click()"
+           style="border:1.5px dashed var(--border);border-radius:6px;padding:12px;text-align:center;color:var(--text2);cursor:pointer;font-size:12px">
+        Drop or click to import the Laredo transfer COR PDF — reads the Del Bravo BOL, then verify &amp; Split by PO
+      </div>
+      <input type="file" id="lar-file-input" accept=".pdf" style="display:none" onchange="_larImport(event)">
+    </div>
     <div id="edi-load-list"></div>`;
   renderElxLoads();
+  try{ _wacoRenderStage(); }catch(e){}
 }
 // Free-text grid cell: writes value + updates totals in place (NO re-render) so
 // tabbing between fields keeps focus. Saves to Firebase on commit (blur/enter).
