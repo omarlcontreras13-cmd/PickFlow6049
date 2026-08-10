@@ -327,7 +327,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 48;
+const APP_BUILD = 49;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -2042,6 +2042,22 @@ function ticketStageInfo(t){
   if (printed) return {label:'PRINTED', bg:'#86efac', border:'#4ade80', icon:'🖨'};
   return {label:'CREATED', bg:'#facc15', border:'#eab308', icon:'✎'};
 }
+// ── HOT / PRIORITY FLAG (additive) — mark a pick ticket priority; shows in the summary view ──
+function ticketHotBadge(t, small){
+  if (!t || !t.hot) return '';
+  const pad = small ? '0 6px' : '1px 8px', fs = small ? '9px' : '10px';
+  return '<span style="display:inline-block;background:#dc2626;border:1px solid #b91c1c;color:#fff;border-radius:10px;padding:'+pad+';font-size:'+fs+';font-weight:bold;letter-spacing:.5px;white-space:nowrap">🔥 HOT</span>';
+}
+function toggleHotTicket(id){
+  const t = (state.tickets||[]).find(function(x){return x.id===id;}) || (state.archivedTickets||[]).find(function(x){return x.id===id;});
+  if(!t) return;
+  t.hot = !t.hot;
+  try{ syncTicketsToFirebase(); }catch(e){}
+  updateTicketList();
+  if (state.currentView==='ticket') viewTicket(id);
+  else if (typeof showDashboard==='function' && state.currentView==='dashboard') showDashboard();
+  showAlert(t.hot ? '🔥 '+id+' flagged HOT — priority.' : id+' priority flag removed.','success');
+}
 function ticketStageBadge(t, small){
   const info = ticketStageInfo(t);
   const pad = small ? '0 6px' : '1px 8px', fs = small ? '9px' : '10px';
@@ -2090,7 +2106,7 @@ function showDashboard() {
               <div style="font-size:11px;color:var(--text2);margin-top:2px">${t.creator}${t.appt?' · Appt: '+t.appt:''} · ${new Date(t.created).toLocaleDateString()}</div>
             </div>
             <div style="text-align:right">
-              <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">${ticketStageBadge(t)}${(isAdmin() && ticketStageInfo(t).label==='PRINTED') ? `<span onclick="event.stopPropagation();unprintTicket('${t.id}')" title="Reverse print — undo the print flag (printed in error)" style="cursor:pointer;color:var(--warning);font-weight:bold;font-size:14px;line-height:1;padding:0 3px;user-select:none">↩</span>` : ''}<div style="font-size:13px;color:var(--accent2);font-weight:bold">${ticketTotalPcs(t).toLocaleString()} pcs</div></div>
+              <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">${ticketHotBadge(t)}${ticketStageBadge(t)}${(isAdmin() && ticketStageInfo(t).label==='PRINTED') ? `<span onclick="event.stopPropagation();unprintTicket('${t.id}')" title="Reverse print — undo the print flag (printed in error)" style="cursor:pointer;color:var(--warning);font-weight:bold;font-size:14px;line-height:1;padding:0 3px;user-select:none">↩</span>` : ''}<div style="font-size:13px;color:var(--accent2);font-weight:bold">${ticketTotalPcs(t).toLocaleString()} pcs</div></div>
               <div style="font-size:11px;color:var(--text2)">${ticketTotalPallets(t)} pallets · ${ticketSkuCount(t)} SKUs</div>
               ${t.picker?`<div style="font-size:11px;color:var(--text2)">Picker: ${t.picker}</div>`:''}
               <div style="font-size:11px;color:var(--text2);margin-top:3px">${ticketStampLine(t)}</div>
@@ -2218,7 +2234,7 @@ function updateTicketList() {
       <div class="tid">${t.id}</div>
       <div class="tname">${t.creator}${t.orderNum?' · #'+t.orderNum:''}</div>
       <div class="tmeta">${t.po?'PO# '+t.po+' · ':''}${t.dest||''}${t.dest&&t.skus.filter(s=>s.sku).length?' · ':''}${t.skus.filter(s=>s.sku).length} SKUs</div>
-      <div style="margin-top:3px">${ticketStageBadge(t,true)}</div>
+      <div style="margin-top:3px">${ticketHotBadge(t,true)}${ticketStageBadge(t,true)}</div>
     </div>`).join('');
 }
 
@@ -2239,7 +2255,7 @@ function viewTicket(id) {
         <div style="font-size:10px;color:var(--text2);letter-spacing:2px;border:1px solid var(--border);padding:2px 8px;border-radius:4px">ORDER PICK TICKET</div>
         ${ticket.po?`<div style="font-size:10px;color:var(--accent);letter-spacing:2px;border:1px solid var(--accent);padding:2px 8px;border-radius:4px;font-weight:bold">NEXUS · PO# ${ticket.po}</div>`:''}
       </div>
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">${ticketStageBadge(ticket)}${ticketStageHistory(ticket)}</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">${ticketHotBadge(ticket)}${ticketStageBadge(ticket)}${ticketStageHistory(ticket)}</div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px 20px;margin-bottom:16px">
         <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">DATE</div><div style="font-size:13px">${fmtDate}</div></div>
         <div><div style="font-size:10px;color:var(--text2);letter-spacing:1px;margin-bottom:2px">CLERK</div><div style="font-size:13px">${ticket.creator||'—'}</div></div>
@@ -2256,6 +2272,7 @@ function viewTicket(id) {
       <div style="display:flex;gap:8px;padding:10px 20px;margin:0 -20px;background:var(--surface2);border-top:1px solid var(--border);border-radius:0 0 10px 10px;flex-wrap:wrap">
         <button class="btn btn-sm" style="font-weight:bold" onclick="goHome()">🏠 Home</button>
         <button class="btn btn-sm" style="font-weight:bold" onclick="exportLoadTag('${id}')">🏷 Load Tag</button>
+        <button class="btn btn-sm" style="font-weight:bold;${ticket.hot?'background:#dc2626;color:#fff;border-color:#dc2626':'border-color:#dc2626;color:#dc2626'}" onclick="toggleHotTicket('${id}')">🔥 ${ticket.hot?'HOT ✓':'Mark HOT'}</button>
         <button class="btn btn-sm" style="font-weight:bold" onclick="editTicket('${id}')">✎ Edit</button>
         <button class="btn btn-sm" style="font-weight:bold" onclick="exportPickTicketWord('${id}')">📄 Pick Ticket</button>
         <button class="btn btn-sm" style="font-weight:bold" onclick="window.print()">🖨 Print</button>
