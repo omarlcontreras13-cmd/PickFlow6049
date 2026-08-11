@@ -327,7 +327,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 49;
+const APP_BUILD = 50;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -6365,12 +6365,92 @@ function _wacoCommitAll(){
   showEdi();
   showAlert('✓ Created '+n+' Waco load(s).','success');
 }
+// ═══ ADDITIONAL SOURCE — shipment-plan XLSX (e.g. "ATL transit") ═══════════════
+// Read alongside the Concentrado-Base file. Rows are mapped into the SAME source schema
+// {pedido, invoice, entrega, material, desc, lote, tarimas, bpp} and merged into window._elxSrc,
+// so the existing Order#/PO# search, load build, and export all work over the combined data.
+// Header names are Spanish and may sit below a title row; matched accent/space-insensitively.
+function _elxTnorm(v){ return String(v==null?'':v).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,''); }
+function _elxParseShipmentPlan(data){
+  const wb = XLSX.read(data, { type:'array', cellDates:true });
+  const names = wb.SheetNames || [];
+  let found = null;
+  for (let si=0; si<names.length && !found; si++){
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[names[si]], { header:1, defval:'' });
+    for (let i=0;i<Math.min(aoa.length,15);i++){
+      const norms = (aoa[i]||[]).map(_elxTnorm);
+      if (norms.indexOf('pedido')>=0 && (norms.indexOf('material')>=0 || norms.indexOf('entrega')>=0)){
+        found = { sheet:names[si], aoa:aoa, hi:i, norms:norms }; break;
+      }
+    }
+  }
+  if (!found) return { sheet:(names[0]||''), rows:[] };
+  const norms = found.norms;
+  const col = function(al){ for (let i=0;i<norms.length;i++){ if (al.indexOf(norms[i])>=0) return i; } return -1; };
+  const ci = { pedido:col(['pedido']), factura:col(['factura']), entrega:col(['entrega']),
+    material:col(['material']), desc:col(['nombremateria','nombrematerial']), lote:col(['lote']),
+    cant:col(['cantidad']), pall:col(['ctdpall']) };
+  const g = function(r,i){ return i>=0 ? r[i] : ''; };
+  const rows = [];
+  for (let i=found.hi+1;i<found.aoa.length;i++){
+    const r = found.aoa[i];
+    const ped = String(g(r,ci.pedido)==null?'':g(r,ci.pedido)).trim();
+    if (!ped) continue;
+    const cant = _elxInt(g(r,ci.cant)), pall = _elxInt(g(r,ci.pall));
+    rows.push({ pedido:ped,
+      invoice:String(g(r,ci.factura)==null?'':g(r,ci.factura)).trim(),
+      entrega:g(r,ci.entrega),
+      material:String(g(r,ci.material)==null?'':g(r,ci.material)).trim(),
+      desc:g(r,ci.desc),
+      lote:String(g(r,ci.lote)==null?'':g(r,ci.lote)).trim(),
+      tarimas:pall,
+      bpp:(pall>0 && cant>0) ? Math.round(cant/pall) : 0 });
+  }
+  return { sheet:found.sheet, rows:rows };
+}
+// Merge every stored additional file's rows onto the current Concentrado base rows.
+window._elxAddlStore = window._elxAddlStore || {};
+function _elxMergeAddl(){
+  const base = ((window._elxSrc && window._elxSrc.rows) ? window._elxSrc.rows : []).filter(function(r){ return !r._addlSrc; });
+  const rows = base.slice();
+  const files = Object.keys(window._elxAddlStore);
+  files.forEach(function(fn){ (window._elxAddlStore[fn]||[]).forEach(function(r){ const rr=Object.assign({}, r); rr._addlSrc=fn; rows.push(rr); }); });
+  const orders={}, pos={}; rows.forEach(function(r){ if(r.pedido) orders[r.pedido]=1; if(r.invoice) pos[r.invoice]=1; });
+  const S = window._elxSrc || { fileName:'', sheet:'' };
+  S.rows = rows; S.orderCount = Object.keys(orders).length; S.poCount = Object.keys(pos).length;
+  S.addlFiles = files.slice();
+  if (!S.fileName) S.fileName = files[0] || '';
+  window._elxSrc = S;
+}
+function _elxAddlImport(ev){
+  const f = ev && ev.target && ev.target.files && ev.target.files[0];
+  if (ev && ev.target) ev.target.value='';
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = function(e){
+    try{
+      const parsed = _elxParseShipmentPlan(new Uint8Array(e.target.result));
+      if (!parsed.rows.length){ showAlert('No shipment-plan rows found in '+f.name+' (need columns like pedido, entrega, material, lote, Ctd Pall).','danger'); return; }
+      window._elxAddlStore = window._elxAddlStore || {};
+      window._elxAddlStore[f.name] = parsed.rows;
+      _elxMergeAddl();
+      showAlert('✓ Added source '+f.name+' — '+parsed.rows.length+' rows ('+parsed.sheet+'). Combined base is now '+window._elxSrc.rows.length+' rows · '+window._elxSrc.orderCount+' Order #s · '+window._elxSrc.poCount+' PO#s.','success');
+      if (state.currentView==='edi') showEdi();
+    }catch(err){ console.error(err); showAlert('Additional source import failed — '+((err&&err.message)||err),'danger'); }
+  };
+  rd.onerror = function(){ showAlert('Could not read the file.','danger'); };
+  rd.readAsArrayBuffer(f);
+}
 function showEdi(){
   state.currentView = 'edi';
   const src = window._elxSrc;
   const srcLine = src
     ? '<span style="color:var(--accent2)">✓ '+src.fileName+'</span> · '+src.rows.length+' rows · '+src.orderCount+' Order #s · '+src.poCount+' PO#s ('+src.sheet+')'
     : '<span style="color:var(--text2)">No source imported yet — import the Concentrado-Base XLSX to search a PO.</span>';
+  const _addlFiles = (window._elxSrc && window._elxSrc.addlFiles) ? window._elxSrc.addlFiles : [];
+  const addlLine = _addlFiles.length
+    ? '<span style="color:var(--accent2)">✓ Additional source(s): '+_addlFiles.join(', ')+'</span> — merged into the base data'
+    : '<span style="color:var(--text2)">Optional — also drop a shipment-plan XLSX (e.g. ATL transit) to widen the base data. Import the Concentrado first, then additional files.</span>';
   document.getElementById('main-panel').innerHTML = `
     <div class="section-title">EDI · ELECTROLIT INBOUND</div>
     <div id="edi-dup-warn"></div>
@@ -6393,6 +6473,15 @@ function showEdi(){
         </div>
       </div>
       <div style="font-size:11px;margin-top:8px">${srcLine}</div>
+      <div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:8px">
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px">ADDITIONAL SOURCE (optional) — shipment-plan XLSX (e.g. ATL transit), read as extra base data</div>
+        <div id="elx-addl-drop" ondragover="event.preventDefault();this.style.borderColor='#2e7d32'" ondragleave="this.style.borderColor=''" ondrop="event.preventDefault();this.style.borderColor='';_elxAddlImport({target:{files:event.dataTransfer.files}})" onclick="document.getElementById('elx-addl-input').click()"
+             style="border:1.5px dashed var(--border);border-radius:6px;padding:12px;text-align:center;color:var(--text2);cursor:pointer;font-size:12px">
+          Drop or click to add a shipment-plan XLSX — merged into the same source data (Order / PO / Lot)
+        </div>
+        <input type="file" id="elx-addl-input" accept=".xlsx,.xls" style="display:none" onchange="_elxAddlImport(event)">
+        <div style="font-size:11px;margin-top:6px">${addlLine}</div>
+      </div>
     </div>
     <div class="ticket-form" style="margin-bottom:14px;border:1px solid var(--accent)">
       <div style="font-size:12px;font-weight:bold;letter-spacing:1px;color:var(--accent);margin-bottom:6px">🏭 WACO PLANT — Packing List (multi-tab XLSX · one load per tab)</div>
