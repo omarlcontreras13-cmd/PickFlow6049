@@ -327,7 +327,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 50;
+const APP_BUILD = 58;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -6500,6 +6500,9 @@ function showEdi(){
       </div>
       <input type="file" id="lar-file-input" accept=".pdf" style="display:none" onchange="_larImport(event)">
     </div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button onclick="_elxNewOrder()" title="Add a blank order to fill in manually (same fields as a dragged PDF)" style="background:#2e7d32;color:#fff;border:none;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:12px;font-weight:700">+ New Order</button>
+    </div>
     <div id="edi-load-list"></div>`;
   renderElxLoads();
   try{ _wacoRenderStage(); }catch(e){}
@@ -6512,12 +6515,12 @@ function _elxCell(idx, ri, field, value, opts){
   const align = opts.num ? 'right' : 'left';
   const w = opts.width || (opts.num ? '80px' : '100%');
   return '<input id="elx-'+field+'-'+idx+'-'+ri+'" value="'+esc+'"'
-    +' oninput="_elxEdit('+idx+','+ri+',\''+field+'\',this.value,false)"'
-    +' onchange="_elxEdit('+idx+','+ri+',\''+field+'\',this.value,true)"'
+    +' oninput="_elxEdit('+idx+','+ri+',\''+field+'\',this.value.toUpperCase(),false)"'
+    +' onchange="_elxEdit('+idx+','+ri+',\''+field+'\',this.value.toUpperCase(),true)"'
     +' onfocus="window._elxEditing=true" onblur="_elxCellBlur()"'
     +' onkeydown="_elxCellKey(event,'+idx+','+ri+',\''+field+'\')"'
     +' spellcheck="false" autocomplete="off"'
-    +' style="width:'+w+';box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:2px 5px;color:var(--text);font-family:var(--font);font-size:10px;text-align:'+align+';outline:none">';
+    +' style="width:'+w+';box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:2px 5px;color:var(--text);font-family:var(--font);font-size:10px;text-transform:uppercase;text-align:'+align+';outline:none">';
 }
 function _elxEdit(idx, ri, field, val, commit){
   const load=(window._elxLoads||[])[idx]; if(!load||!load.rows||!load.rows[ri]) return;
@@ -6573,6 +6576,21 @@ function _elxAddRow(idx, ri){
   if(typeof _ediReopenDetail==='function') _ediReopenDetail('elx-detail-'+idx);
   setTimeout(function(){ const el=document.getElementById('elx-sku-'+idx+'-'+at); if(el) el.focus(); }, 0);
 }
+function _elxSetOrder(idx, val){ const load=(window._elxLoads||[])[idx]; if(!load) return; load.order=val; try{ _ediSave(); }catch(e){} }
+function _elxNewOrder(){
+  window._elxLoads = window._elxLoads || [];
+  const load = { order:'', po:'', source:'delbravo',
+    header:{ receiver:'', invoice:'', truck:'' },
+    rows:[{ sku:'', productId:'', lot:'', po:'', cases:'', expDate:'', cpp:'', net:'', gross:'', unknownSku:false }],
+    recon:{ palletQty:0, estPallets:0 }, createdAt:Date.now(), manual:true };
+  window._elxLoads.push(load);
+  const idx=window._elxLoads.length-1;
+  try{ _ediSave(); }catch(e){}
+  showEdi();
+  if(typeof _ediReopenDetail==='function') _ediReopenDetail('elx-detail-'+idx);
+  setTimeout(function(){ const el=document.getElementById('elx-db-sku-'+idx+'-0'); if(el) el.focus(); }, 10);
+  try{ showAlert('✓ New blank order added — fill in the details, then Split by PO.','success'); }catch(e){}
+}
 function renderElxLoads(){
   const host = document.getElementById('edi-load-list');
   if (!host) return;
@@ -6590,7 +6608,7 @@ function renderElxLoads(){
     const unknown = rows.filter(function(r){return r.unknownSku;}).length;
     const H = load.header||{};
     const hin = function(key,label,val){ return '<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:9px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">'+label+'</label>'
-      +'<input id="elx-hdr-'+key+'-'+idx+'" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" oninput="_elxHdr('+idx+',&quot;'+key+'&quot;,this.value)" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--bg);color:var(--text);outline:none;width:120px"></div>'; };
+      +'<input id="elx-hdr-'+key+'-'+idx+'" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" oninput="_elxHdr('+idx+',&quot;'+key+'&quot;,this.value.toUpperCase())" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--bg);color:var(--text);text-transform:uppercase;outline:none;width:120px"></div>'; };
     const totPcs = rows.reduce(function(s,r){return s+(parseFloat(r.pcs)||0);},0).toLocaleString();
     const totWt  = rows.reduce(function(s,r){return s+(r.net===''?0:(parseFloat(r.net)||0));},0).toLocaleString();
     const totGr  = rows.reduce(function(s,r){return s+(r.gross===''?0:(parseFloat(r.gross)||0));},0).toLocaleString();
@@ -6615,7 +6633,7 @@ function renderElxLoads(){
           +'<div style="font-size:10px;color:'+((unknown||load.multiPo||load.source==='pdf')?'var(--warning)':'var(--text2)')+'">'+rows.length+' lines'+(unknown?(' · ⚠ '+unknown+' unknown SKU'):'')+(load.multiPo?(' · ⚠ '+load.pos.length+' POs'):'')+(load.source==='pdf'?(' · 📄 PDF'+(load.recon&&load.recon.palletQty&&load.recon.detected<load.recon.palletQty?(' · read '+load.recon.detected+'/'+load.recon.palletQty+' — verify LOTs'):' · verify LOTs')):((!unknown&&!load.multiPo)?' · reconciled':''))+'</div></div>'
         +'<div style="display:flex;gap:6px;flex:none">'+hin('receiver','Receiver',H.receiver)
           +'<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:9px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">PO #</label>'
-          +'<input id="elx-po-'+idx+'" value="'+String(load.po==null?'':load.po).replace(/"/g,'&quot;')+'" oninput="_elxSetPo('+idx+',this.value)" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--bg);color:var(--text);outline:none;width:120px"></div>'
+          +'<input id="elx-po-'+idx+'" value="'+String(load.po==null?'':load.po).replace(/"/g,'&quot;')+'" oninput="_elxSetPo('+idx+',this.value.toUpperCase())" style="padding:4px 7px;border:1.5px solid #2e7d32;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--bg);color:var(--text);text-transform:uppercase;outline:none;width:120px"></div>'
           +hin('invoice','Invoice #',H.invoice)+hin('truck','Truck #',H.truck)+'</div>'
         +'<div style="flex:1;min-width:12px"></div>'
         +'<div style="text-align:right;white-space:nowrap;width:72px;flex:none"><div id="elx-hdrpcs-'+idx+'" style="font-weight:bold;color:'+G+';font-size:13px">'+totPcs+'</div><div style="font-size:10px;color:var(--text2)">pcs</div></div>'
@@ -6753,7 +6771,28 @@ function _elxDbSet(idx, ri, field, val){
 }
 // Refresh the staging display (Product ID / Pallets / Split count) after an edit
 // commits (blur), without interrupting typing. Guarded so it only fires for staging.
-function _elxDbRefresh(idx){ const load=(window._elxLoads||[])[idx]; if(!load||load.source!=='delbravo') return; showEdi(); if(typeof _ediReopenDetail==='function') _ediReopenDetail('elx-detail-'+idx); }
+const _ELX_DB_FIELDS=['sku','productId','lot','po','cases','expDate'];
+function _elxDbKey(e, idx, ri, field){
+  if(e.key!=='Tab' && e.key!=='Enter') return;
+  const load=(window._elxLoads||[])[idx]; if(!load) return;
+  const rows=load.rows||[]; const F=_ELX_DB_FIELDS; const nf=F.length;
+  const fi=F.indexOf(field); if(fi<0) return;
+  // Auto-populate the master-derived Product ID (set on the model by _elxDbSet) into its cell
+  // in place, so it fills without the full re-render that would interrupt tabbing.
+  const _cur=rows[ri];
+  if(_cur){ const _pe=document.getElementById('elx-db-productId-'+idx+'-'+ri);
+    if(_pe && _cur.productId!=null && _pe.value!==String(_cur.productId)) _pe.value=_cur.productId; }
+  let r=ri, f=fi;
+  if(e.key==='Tab'){ f=fi+(e.shiftKey?-1:1); if(f>=nf){f=0;r=ri+1;} if(f<0){f=nf-1;r=ri-1;} }
+  else { r=ri+(e.shiftKey?-1:1); }
+  if(r<0||r>=rows.length) return;           // let Tab leave the grid naturally at the edges
+  e.preventDefault();
+  window._elxEditing=true; window._elxDbSkipRefresh=true;   // don't re-render/steal focus mid-tab
+  const t=document.getElementById('elx-db-'+F[f]+'-'+idx+'-'+r);
+  if(t){ t.focus(); if(t.select) t.select(); }
+  window._elxDbSkipRefresh=false;
+}
+function _elxDbRefresh(idx){ if(window._elxDbSkipRefresh) return; const load=(window._elxLoads||[])[idx]; if(!load||load.source!=='delbravo') return; showEdi(); if(typeof _ediReopenDetail==='function') _ediReopenDetail('elx-detail-'+idx); }
 function _elxDbAddRow(idx){
   const load=(window._elxLoads||[])[idx]; if(!load||load.source!=='delbravo') return; load.rows=load.rows||[];
   load.rows.push({ sku:'', productId:'', lot:'', po:'', cases:'', expDate:'', cpp:'', net:'', gross:'', unknownSku:false });
@@ -6791,7 +6830,7 @@ function _elxDelBravoSplit(idx){
 function _elxRenderDelBravo(idx, load){
   const G='#2e7d32'; const rows=load.rows||[]; const H=load.header||{}; const detailId='elx-detail-'+idx;
   const hin=function(key,label,val){ return '<div style="display:flex;flex-direction:column;gap:2px"><label style="font-size:9px;letter-spacing:1px;font-weight:700;color:var(--text2);text-transform:uppercase">'+label+'</label>'
-    +'<input id="elx-hdr-'+key+'-'+idx+'" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" oninput="_elxHdr('+idx+',&quot;'+key+'&quot;,this.value)" style="padding:4px 7px;border:1.5px solid '+G+';border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--bg);color:var(--text);outline:none;width:120px"></div>'; };
+    +'<input id="elx-hdr-'+key+'-'+idx+'" value="'+String(val==null?'':val).replace(/"/g,'&quot;')+'" oninput="_elxHdr('+idx+',&quot;'+key+'&quot;,this.value.toUpperCase())" style="padding:4px 7px;border:1.5px solid '+G+';border-radius:6px;font-family:var(--font);font-size:11px;font-weight:700;background:var(--bg);color:var(--text);text-transform:uppercase;outline:none;width:120px"></div>'; };
   const pos=[]; rows.forEach(function(r){ const p=String(r.po||'').trim(); if(p&&pos.indexOf(p)<0)pos.push(p); });
   let est=0; rows.forEach(function(r){ const c=parseFloat(r.cpp)||0, ca=parseFloat(r.cases)||0; if(c&&ca) est+=Math.round(ca/c); });
   const printed=(load.recon&&load.recon.palletQty)||0;
@@ -6799,7 +6838,7 @@ function _elxRenderDelBravo(idx, load){
   const cell=function(ri,field,val,opts){ opts=opts||{}; const esc=String(val==null?'':val).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
     // id starts with "elx-" and sets window._elxEditing so the Firebase echo does NOT
     // re-render mid-edit (otherwise a keystroke interrupts typing and truncates the PO).
-    return '<input id="elx-db-'+field+'-'+idx+'-'+ri+'" value="'+esc+'" oninput="_elxDbSet('+idx+','+ri+',\''+field+'\',this.value)" onchange="_elxDbRefresh('+idx+')" onfocus="window._elxEditing=true" onblur="_elxCellBlur()" spellcheck="false" autocomplete="off" style="width:'+(opts.width||'100%')+';box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:2px 5px;color:var(--text);font-family:var(--font);font-size:10px;text-align:'+(opts.num?'right':'left')+';outline:none">'; };
+    return '<input id="elx-db-'+field+'-'+idx+'-'+ri+'" value="'+esc+'" oninput="_elxDbSet('+idx+','+ri+',\''+field+'\',this.value.toUpperCase())" onchange="_elxDbRefresh('+idx+')" onkeydown="_elxDbKey(event,'+idx+','+ri+',\''+field+'\')" onfocus="window._elxEditing=true" onblur="_elxCellBlur()" spellcheck="false" autocomplete="off" style="width:'+(opts.width||'100%')+';box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:2px 5px;color:var(--text);font-family:var(--font);font-size:10px;text-transform:uppercase;text-align:'+(opts.num?'right':'left')+';outline:none">'; };
   const drows=rows.map(function(r, ri){
     const bg=ri%2!==0?'rgba(0,0,0,0.03)':''; const skuBg=r.unknownSku?';background:rgba(185,28,28,0.10)':'';
     const cpp=parseFloat(r.cpp)||0, ca=parseFloat(r.cases)||0; const pl=(cpp&&ca)?Math.round(ca/cpp):0;
@@ -6808,14 +6847,14 @@ function _elxRenderDelBravo(idx, load){
       +'<td style="padding:3px 6px">'+cell(ri,'productId',r.productId,{width:'160px'})+'</td>'
       +'<td style="padding:3px 6px">'+cell(ri,'lot',r.lot,{width:'100px'})+'</td>'
       +'<td style="padding:3px 6px">'+cell(ri,'po',r.po,{width:'100px'})+'</td>'
-      +'<td style="padding:3px 6px">'+cell(ri,'cases',r.cases,{num:true,width:'70px'})+'</td>'
-      +'<td style="padding:3px 6px;text-align:right;color:var(--text2)">'+(pl||'—')+'</td>'
-      +'<td style="padding:3px 6px">'+cell(ri,'expDate',r.expDate,{width:'90px'})+'</td>'
+      +'<td style="padding:3px 6px;text-align:center">'+cell(ri,'cases',r.cases,{num:true,width:'70px'})+'</td>'
+      +'<td style="padding:3px 6px;text-align:center;color:var(--text2)">'+(pl||'—')+'</td>'
+      +'<td style="padding:3px 6px;text-align:center">'+cell(ri,'expDate',r.expDate,{width:'90px'})+'</td>'
       +'<td style="padding:3px 6px;text-align:center"><button onclick="_elxDeleteRow('+idx+','+ri+')" tabindex="-1" title="Delete line" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:0 3px">✕</button></td></tr>';
   }).join('');
   return '<div class="ticket-form" style="margin-bottom:10px;padding:0;overflow:hidden;border:1.5px solid '+G+'">'
     +'<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--surface);flex-wrap:wrap">'
-      +'<div style="flex:1;min-width:190px"><div style="font-weight:bold;color:'+G+';font-size:13px;white-space:nowrap">Del Bravo BOL · Order '+(load.order||'—')+'</div>'
+      +'<div style="flex:1;min-width:190px"><div style="font-weight:bold;color:'+G+';font-size:13px;white-space:nowrap">Del Bravo BOL · Order '+(load.manual?('<input id="elx-dborder-'+idx+'" value="'+String(load.order==null?'':load.order).replace(/"/g,'&quot;')+'" oninput="_elxSetOrder('+idx+',this.value.toUpperCase())" placeholder="Order #" style="display:inline-block;width:130px;font-family:var(--font);font-size:13px;font-weight:bold;color:'+G+';background:transparent;border:none;border-bottom:1px dashed '+G+';padding:0 2px;outline:none;text-transform:uppercase;vertical-align:baseline">'):(load.order||'—'))+'</div>'
         +'<div style="font-size:10px;color:var(--warning)">📄 staging · '+rows.length+' line(s) · '+pos.length+' PO(s) · ~'+est+' pallets'+(printed?(' / printed '+printed+(mismatch?' ⚠':' ✓')):'')+' — verify then Split</div></div>'
       +'<div style="display:flex;gap:6px;flex-wrap:wrap">'+hin('receiver','Receiver',H.receiver)+hin('truck','Truck #',H.truck)+'</div>'
       +'<button onclick="_elxDbAddRow('+idx+')" title="Add a blank line" style="background:none;border:1.5px solid '+G+';color:'+G+';border-radius:5px;padding:6px 12px;cursor:pointer;font-size:11px;font-weight:700">+ Add Line</button>'
@@ -6827,8 +6866,8 @@ function _elxRenderDelBravo(idx, load){
       +'<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--surface2)">'
         +'<th style="padding:5px 6px;text-align:left;color:var(--text2)">SKU</th><th style="padding:5px 6px;text-align:left;color:var(--text2)">PRODUCT ID</th>'
         +'<th style="padding:5px 6px;text-align:left;color:var(--text2)">LOT #</th><th style="padding:5px 6px;text-align:left;color:var(--text2)">PO # (#Inv)</th>'
-        +'<th style="padding:5px 6px;text-align:right;color:var(--text2)">CASES</th><th style="padding:5px 6px;text-align:right;color:var(--text2)">PALLETS</th>'
-        +'<th style="padding:5px 6px;text-align:left;color:var(--text2)">EXP DATE</th><th style="width:24px"></th>'
+        +'<th style="padding:5px 6px;text-align:center;color:var(--text2)">CASES</th><th style="padding:5px 6px;text-align:center;color:var(--text2)">PALLETS</th>'
+        +'<th style="padding:5px 6px;text-align:center;color:var(--text2)">EXP DATE</th><th style="width:24px"></th>'
       +'</tr></thead><tbody>'+drows+'</tbody></table>'
     +'</div></div>';
 }
