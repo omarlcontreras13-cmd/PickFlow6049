@@ -327,7 +327,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 59;
+const APP_BUILD = 63;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -3082,15 +3082,29 @@ function renderCCMonthList(monthKey) {
   const list = ((window._ccSessionsByMonth||{})[monthKey] || []).slice().sort((a,b)=>b.createdAt-a.createdAt);
   if (lbl) lbl.textContent = ccMonthLabel(monthKey) + ' (' + list.length + ')';
   if (!list.length) { el.innerHTML = '<div style="font-size:12px;color:var(--text2)">No counts this month.</div>'; return; }
-  el.innerHTML = list.map(s=>`
-    <div style="padding:9px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:12px">
+  el.innerHTML = list.map(s=>{
+    const locs = (s.locations||[]);
+    const searchStr = (s.id+' '+(s.countedBy||'')+' '+locs.join(' ')).toLowerCase().replace(/"/g,'&quot;');
+    const locsDisp = locs.length ? locs.join(', ').replace(/</g,'&lt;') : '';
+    return `
+    <div data-ccsearch="${searchStr}" style="padding:9px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;font-size:12px">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:4px">
         <span style="font-weight:bold;color:var(--accent);cursor:pointer" onclick="viewCCSession('${s.id}')">${s.id}</span>
         ${(!isArchived && isAdmin())?`<button onclick="confirmDeleteSession('${s.id}')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;padding:0">✕</button>`:(isArchived?`<span style="font-size:9px;color:var(--text2);letter-spacing:1px">ARCHIVED</span>`:'')}
       </div>
       <div style="color:var(--text2);font-size:11px;cursor:pointer" onclick="viewCCSession('${s.id}')">${new Date(s.createdAt).toLocaleString()} · ${s.countedBy}</div>
-      <div style="color:var(--text2);font-size:11px">${(s.locations||[]).length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted</span>`:''}</div>
-    </div>`).join('');
+      <div style="color:var(--text2);font-size:11px">${locs.length} locations${s.adjustments&&s.adjustments.length?` · <span style="color:var(--accent2)">Adjusted</span>`:''}</div>
+      ${locsDisp?`<div style="color:var(--text);font-size:10px;margin-top:3px;line-height:1.5;word-break:break-word;background:var(--surface2);border-radius:4px;padding:4px 6px">📍 ${locsDisp}</div>`:''}
+    </div>`;}).join('');
+  filterCCMonthList();   // re-apply any active search after a month switch
+}
+
+// Filter the monthly counts sidebar by session #, counter name, or location code.
+function filterCCMonthList(){
+  var q=((document.getElementById('cc-month-search')||{}).value||'').toLowerCase().trim();
+  document.querySelectorAll('#cc-month-list [data-ccsearch]').forEach(function(card){
+    card.style.display = (!q || card.getAttribute('data-ccsearch').indexOf(q)!==-1) ? '' : 'none';
+  });
 }
 
 function showCycleCountStart() {
@@ -3247,6 +3261,7 @@ function showCycleCountStart() {
       }));
 
     const fi = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-family:var(--font);font-size:13px;outline:none;width:100%';
+    const fic = 'background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:4px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;width:100%;box-sizing:border-box';   // compact filter style
 
     // Month count map
     const monthCountMap = {};
@@ -3319,11 +3334,11 @@ function showCycleCountStart() {
         </div>`).join('')}
     </div>
 
-    <!-- Main 3-col grid -->
-    <div style="display:grid;grid-template-columns:200px 1fr 300px;gap:14px;align-items:start">
+    <!-- Main 3-col grid — fills the viewport; the location list and counts list scroll on their own -->
+    <div style="display:grid;grid-template-columns:200px 1fr 300px;gap:14px;align-items:stretch;height:calc(100vh - 250px);min-height:420px">
 
       <!-- Suggested -->
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;overflow-y:auto;min-height:0">
         <div style="font-size:10px;font-weight:bold;color:var(--warning);letter-spacing:1px;margin-bottom:8px">⚡ SUGGESTED</div>
         <div style="font-size:9px;color:var(--text2);margin-bottom:10px;line-height:1.4">Most recently put-away locations</div>`;
 
@@ -3347,43 +3362,69 @@ function showCycleCountStart() {
     html += `</div>
 
       <!-- Location selector -->
-      <div>
-        <div style="font-size:11px;color:var(--text2);letter-spacing:1px;margin-bottom:10px;font-weight:bold">
+      <div style="display:flex;flex-direction:column;min-height:0">
+        <div style="font-size:11px;color:var(--text2);letter-spacing:1px;margin-bottom:6px;font-weight:bold">
           SELECT LOCATIONS TO COUNT
           <span style="font-size:10px;font-weight:normal;margin-left:8px">${storageLocs.length} total locations (${uncountedLocs.length} not yet counted)</span>
         </div>
-        <div class="form-group" style="margin-bottom:10px">
-          <input type="text" id="cc-loc-search" placeholder="Filter locations..." oninput="filterCCLocs()" style="${fi}">
+        <!-- Compact filter row: location text · customer · SKU · lot -->
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">
+          <input type="text" id="cc-loc-search" placeholder="Filter locations…" oninput="applyCCFilters()" style="${fic};flex:1;min-width:130px">
+          <select id="cc-cust-filter" onchange="applyCCFilters()" style="${fic};flex:1;min-width:130px" title="Show only locations holding this customer and count only their inventory">
+            <option value="__all__">All customers</option>
+            ${(()=>{ const cs=[...new Set(state.inventory.map(r=>(r.customer||'').trim()).filter(Boolean))].sort(); return cs.map(c=>'<option value="'+String(c).replace(/"/g,'&quot;')+'">'+String(c).replace(/</g,'&lt;')+'</option>').join(''); })()}
+          </select>
+          <select id="cc-sku-filter" onchange="ccOnSkuChange()" style="${fic};flex:1;min-width:130px" title="Show only locations holding this SKU and count only that SKU's inventory">
+            <option value="__all__">All SKUs</option>
+            ${(()=>{ const ss=[...new Set(state.inventory.map(r=>(r.sku||'').trim()).filter(Boolean))].sort(); return ss.map(s=>'<option value="'+String(s).replace(/"/g,'&quot;')+'">'+String(s).replace(/</g,'&lt;')+'</option>').join(''); })()}
+          </select>
+          <div style="position:relative;flex:1;min-width:130px">
+            <div id="cc-lot-btn" onclick="ccToggleLotMenu()" style="${fic};cursor:pointer;display:flex;justify-content:space-between;align-items:center" title="Pick one or more lots to count — a SKU can have many lots (check off any number)">
+              <span id="cc-lot-label" style="color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">All lots</span><span style="margin-left:6px;flex-shrink:0">▾</span>
+            </div>
+            <div id="cc-lot-menu" style="display:none;position:absolute;z-index:60;top:calc(100% + 4px);left:0;right:0;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.28);flex-direction:column;max-height:300px">
+              <div style="padding:6px;border-bottom:1px solid var(--border)">
+                <input id="cc-lot-search" oninput="ccLotSearch()" placeholder="Search lots…" style="${fic}">
+              </div>
+              <div style="padding:5px 8px;display:flex;gap:8px;border-bottom:1px solid var(--border)">
+                <button type="button" class="btn btn-sm" onclick="ccLotAll(true)">Check shown</button>
+                <button type="button" class="btn btn-sm" onclick="ccLotAll(false)">Clear</button>
+              </div>
+              <div id="cc-lot-list" style="overflow-y:auto;max-height:200px;padding:4px 6px">
+                ${(()=>{ const ls=[...new Set(state.inventory.map(r=>(r.lot||'').trim()).filter(Boolean))].sort(); return ls.map(l=>{ const U=l.toUpperCase().replace(/"/g,'&quot;'); const D=l.replace(/</g,'&lt;'); return '<label class="cc-lot-opt" data-lot="'+U+'" data-hidden="0" style="display:flex;align-items:center;gap:6px;padding:3px 4px;font-size:12px;cursor:pointer"><input type="checkbox" class="cc-lot-chk" value="'+U+'" onchange="ccApplyLots()" style="width:14px;height:14px">'+D+'</label>'; }).join(''); })()}
+              </div>
+            </div>
+          </div>
         </div>
-        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+        <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center">
           <button class="btn btn-sm" onclick="document.querySelectorAll('.cc-loc-chk').forEach(c=>c.checked=true);updateCCSelCount()">Select All</button>
           <button class="btn btn-sm" onclick="document.querySelectorAll('.cc-loc-chk').forEach(c=>c.checked=false);updateCCSelCount()">Clear All</button>
           <button class="btn btn-sm" onclick="selectUncountedOnly()" style="background:rgba(224,62,62,0.1);color:var(--danger);border-color:var(--danger)">Select Uncounted Only</button>
-          <span id="cc-sel-count" style="font-size:12px;color:var(--text2);padding:5px 8px">0 selected</span>
+          <span id="cc-sel-count" style="font-size:12px;color:var(--text2);padding:3px 6px">0 selected</span>
         </div>
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:10px">
-          <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:7px 12px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
             <span style="font-weight:bold;color:var(--text);font-size:12px">${monthName} Progress</span>
             <span style="font-weight:bold;color:${pctColor};font-size:12px">${countedLocsArr.length} / ${storageLocs.length} &nbsp; ${pct}%
               <span style="font-size:10px;color:${wdRemaining<=3?'var(--danger)':'var(--text2)'}"> &nbsp;(${wdRemaining} work days left)</span>
             </span>
           </div>
-          <div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden">
+          <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden;margin-top:5px">
             <div style="width:${pct}%;background:${pctColor};height:100%;border-radius:4px;transition:width 0.4s"></div>
           </div>
           ${(()=>{
             const remaining = storageLocs.length - countedLocsArr.length;
-            if (remaining <= 0) return '<div style="font-size:11px;color:var(--accent2);margin-top:6px;font-weight:bold">✓ All locations counted this month!</div>';
+            if (remaining <= 0) return '<div style="font-size:11px;color:var(--accent2);margin-top:5px;font-weight:bold">✓ All locations counted this month!</div>';
             const perDay = wdRemaining > 0 ? Math.ceil(remaining / wdRemaining) : remaining;
             const urgColor = perDay >= 20 ? 'var(--danger)' : perDay >= 10 ? 'var(--warning)' : 'var(--accent2)';
-            return '<div style="font-size:11px;color:var(--text2);margin-top:6px">'
+            return '<div style="font-size:11px;color:var(--text2);margin-top:5px">'
               + '<span style="color:var(--text2)">To finish on time: </span>'
               + '<span style="font-weight:bold;color:'+urgColor+'">'+perDay+' location'+(perDay===1?'':'s')+' / day</span>'
               + '<span style="color:var(--text2)"> &nbsp;('+remaining+' remaining ÷ '+wdRemaining+' work day'+(wdRemaining===1?'':'s')+')</span>'
               + '</div>';
           })()}
         </div>
-        <div class="cc-loc-list" id="cc-loc-list" style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px">`;
+        <div class="cc-loc-list" id="cc-loc-list" style="flex:1;min-height:0;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px">`;
 
     if (!storageLocs.length) {
       html += '<div style="text-align:center;color:var(--text2);padding:20px;font-size:13px">No locations found. Import inventory first.</div>';
@@ -3419,18 +3460,29 @@ function showCycleCountStart() {
       </div>
 
       <!-- Monthly counts (audit) -->
-      <div>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px">
+      <div style="display:flex;flex-direction:column;min-height:0">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
           <div style="font-size:11px;color:var(--text2);letter-spacing:1px;font-weight:bold">COUNTS — <span id="cc-month-label"></span></div>
           <select id="cc-month-select" onchange="loadCCMonth(this.value)" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:4px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">${ccMonthOpts}</select>
         </div>
-        <div id="cc-month-list">`;
+        <input type="text" id="cc-month-search" oninput="filterCCMonthList()" placeholder="Search counts — session #, counter, or location…" style="width:100%;box-sizing:border-box;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--text);font-family:var(--font);font-size:11px;outline:none;margin-bottom:8px">
+        <div id="cc-month-list" style="flex:1;min-height:0;overflow-y:auto;padding-right:2px">`;
 
     html += `</div></div></div>`;
 
     panel.innerHTML = '<div class="panel-inner" style="padding:20px">' + html + '</div>';
     window._ccAllLocs = storageLocs;
     window._ccSuggestedLocs = suggestedLocs.map(s=>s.loc);
+    // ── CUSTOMER + SKU + LOT FILTERS (additive) — map each location to the customers /
+    // SKUs / lots it holds so the dropdowns narrow the list and scope the count.
+    try { window._ccLocCustomers = (function(){ var m={}; state.inventory.forEach(function(r){ if(!r.location) return; var c=(r.customer||'').trim(); if(!c) return; if(!m[r.location]) m[r.location]={}; m[r.location][c]=1; }); return m; })(); } catch(e){ window._ccLocCustomers={}; }
+    try { window._ccLocSkus = (function(){ var m={}; state.inventory.forEach(function(r){ if(!r.location) return; var s=(r.sku||'').trim(); if(!s) return; if(!m[r.location]) m[r.location]={}; m[r.location][s]=1; }); return m; })(); } catch(e){ window._ccLocSkus={}; }
+    try { window._ccLocLots = (function(){ var m={}; state.inventory.forEach(function(r){ if(!r.location) return; var l=(r.lot||'').trim().toUpperCase(); if(!l) return; if(!m[r.location]) m[r.location]={}; m[r.location][l]=1; }); return m; })(); } catch(e){ window._ccLocLots={}; }
+    // SKU → its lots, so the lot multi-select can narrow to the chosen SKU's lots.
+    try { window._ccSkuLots = (function(){ var m={}; state.inventory.forEach(function(r){ var s=(r.sku||'').trim(); var l=(r.lot||'').trim().toUpperCase(); if(!s||!l) return; if(!m[s]) m[s]={}; m[s][l]=1; }); return m; })(); } catch(e){ window._ccSkuLots={}; }
+    window._ccCustFilter = '__all__';
+    window._ccSkuFilter = '__all__';
+    window._ccLotSet = new Set();   // checked lots (uppercased); empty = all lots
     renderCCMonthList(ccCurKey);
     // Physically move any prior-month live sessions into the monthly archive node.
     // Safe ordering: write archive copies first, confirm, THEN remove from live (worst case = a
@@ -3917,6 +3969,81 @@ function filterCCLocs() {
   });
 }
 
+// Combined location filter (additive): text box AND customer / SKU / lot dropdowns.
+// Same behavior as PickFlow 6021 — narrows the visible list and records the picks
+// so startCycleCount() can scope the count to just that customer / SKU / lot.
+function applyCCFilters(){
+  var q = ((document.getElementById('cc-loc-search')||{}).value||'').toLowerCase();
+  var custSel = (document.getElementById('cc-cust-filter')||{}).value||'__all__';
+  var skuSel  = (document.getElementById('cc-sku-filter')||{}).value||'__all__';
+  window._ccCustFilter = custSel;
+  window._ccSkuFilter  = skuSel;
+  var lotSet = window._ccLotSet;                       // Set of checked lots (uppercased)
+  var lotOn  = !!(lotSet && lotSet.size);
+  var lotArr = lotOn ? Array.from(lotSet) : null;
+  var map  = window._ccLocCustomers||{};
+  var smap = window._ccLocSkus||{};
+  var lmap = window._ccLocLots||{};
+  document.querySelectorAll('.cc-loc-chk').forEach(function(chk){
+    var row = chk.closest('label'); if(!row) return;
+    var loc = chk.value;
+    var textOk = loc.toLowerCase().indexOf(q)!==-1;
+    var custOk = (custSel==='__all__') || !!(map[loc] && map[loc][custSel]);
+    var skuOk  = (skuSel==='__all__') || !!(smap[loc] && smap[loc][skuSel]);
+    var lotOk  = !lotOn || !!(lmap[loc] && lotArr.some(function(L){ return lmap[loc][L]; }));   // ANY checked lot present
+    row.style.display = (textOk && custOk && skuOk && lotOk) ? 'flex' : 'none';
+  });
+}
+// ── LOT MULTI-SELECT (check off any number of lots for a SKU) ─────────────────
+function ccToggleLotMenu(){
+  var m=document.getElementById('cc-lot-menu'); if(!m) return;
+  var open=(m.style.display==='none'||!m.style.display);
+  m.style.display=open?'flex':'none';
+  if(open && !window._ccLotMenuBound){ window._ccLotMenuBound=true;
+    document.addEventListener('click', function(e){
+      var mm=document.getElementById('cc-lot-menu'), bb=document.getElementById('cc-lot-btn');
+      if(!mm || mm.style.display==='none') return;
+      if(mm.contains(e.target) || (bb && bb.contains(e.target))) return;
+      mm.style.display='none';
+    });
+  }
+}
+function ccLotSearch(){
+  var q=((document.getElementById('cc-lot-search')||{}).value||'').toUpperCase();
+  document.querySelectorAll('.cc-lot-opt').forEach(function(o){
+    if(o.getAttribute('data-hidden')==='1'){ o.style.display='none'; return; }
+    o.style.display = o.getAttribute('data-lot').indexOf(q)!==-1 ? 'flex' : 'none';
+  });
+}
+function ccLotAll(on){
+  document.querySelectorAll('.cc-lot-opt').forEach(function(o){
+    if(o.style.display==='none') return;
+    var c=o.querySelector('.cc-lot-chk'); if(c) c.checked=on;
+  });
+  ccApplyLots();
+}
+function ccApplyLots(){
+  var set=new Set();
+  document.querySelectorAll('.cc-lot-chk:checked').forEach(function(c){ set.add(c.value); });
+  window._ccLotSet=set;
+  var lbl=document.getElementById('cc-lot-label');
+  if(lbl) lbl.textContent = set.size ? (set.size+' lot'+(set.size===1?'':'s')+' selected') : 'All lots';
+  applyCCFilters();
+}
+// When the SKU changes, narrow the lot list to that SKU's lots (uncheck the rest).
+function ccOnSkuChange(){
+  var skuSel=(document.getElementById('cc-sku-filter')||{}).value||'__all__';
+  var allowed=(skuSel==='__all__')?null:((window._ccSkuLots||{})[skuSel]||{});
+  document.querySelectorAll('.cc-lot-opt').forEach(function(o){
+    var L=o.getAttribute('data-lot');
+    var ok=!allowed || !!allowed[L];
+    o.setAttribute('data-hidden', ok?'0':'1');
+    if(!ok){ var c=o.querySelector('.cc-lot-chk'); if(c) c.checked=false; }
+  });
+  ccLotSearch();
+  ccApplyLots();
+}
+
 function loadCCHistory(inline=false) {
   const targetId = inline ? 'cc-inline-history' : 'cc-history-list';
   const el = document.getElementById(targetId);
@@ -3948,6 +4075,9 @@ function startCycleCount() {
   state.inventory.forEach(r => {
     if (!selected.includes(r.location)) return;
     if ((r.pcsPending||0) > 0) return;
+    if (window._ccCustFilter && window._ccCustFilter!=='__all__' && (r.customer||'')!==window._ccCustFilter) return;   // customer filter — inert unless a customer is chosen
+    if (window._ccSkuFilter && window._ccSkuFilter!=='__all__' && (r.sku||'')!==window._ccSkuFilter) return;          // SKU filter — inert unless a SKU is chosen
+    if (window._ccLotSet && window._ccLotSet.size && !window._ccLotSet.has((r.lot||'').trim().toUpperCase())) return; // lot filter — inert unless lots are checked (ANY of them)
     locData[r.location].push(r);
   });
 
