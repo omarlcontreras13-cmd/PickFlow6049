@@ -327,7 +327,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 58;
+const APP_BUILD = 59;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -2480,6 +2480,52 @@ function deleteTicket(id) {
   state.activeTicket=null; updateTicketList(); saveState(); showDashboard();
 }
 
+// ─── CODE 39 BARCODE (self-contained, no external lib) ────────────────────────
+// Warehouse scanners read Code 39 universally; it's self-checking (no checksum
+// needed) and drawn here as filled bars directly into the jsPDF so the pick
+// ticket's WMS Order # can be scanned to start picking. Value is uppercased and
+// stripped to the Code 39 character set (0-9 A-Z - . space $ / + %).
+var _CODE39 = {
+  '0':'NNNWWNWNN','1':'WNNWNNNNW','2':'NNWWNNNNW','3':'WNWWNNNNN','4':'NNNWWNNNW',
+  '5':'WNNWWNNNN','6':'NNWWWNNNN','7':'NNNWNNWNW','8':'WNNWNNWNN','9':'NNWWNNWNN',
+  'A':'WNNNNWNNW','B':'NNWNNWNNW','C':'WNWNNWNNN','D':'NNNNWWNNW','E':'WNNNWWNNN',
+  'F':'NNWNWWNNN','G':'NNNNNWWNW','H':'WNNNNWWNN','I':'NNWNNWWNN','J':'NNNNWWWNN',
+  'K':'WNNNNNNWW','L':'NNWNNNNWW','M':'WNWNNNNWN','N':'NNNNWNNWW','O':'WNNNWNNWN',
+  'P':'NNWNWNNWN','Q':'NNNNNNWWW','R':'WNNNNNWWN','S':'NNWNNNWWN','T':'NNNNWNWWN',
+  'U':'WWNNNNNNW','V':'NWWNNNNNW','W':'WWWNNNNNN','X':'NWNNWNNNW','Y':'WWNNWNNNN',
+  'Z':'NWWNWNNNN','-':'NWNNNNWNW','.':'WWNNNNWNN',' ':'NWWNNNWNN','$':'NWNWNWNNN',
+  '/':'NWNWNNNWN','+':'NWNNNWNWN','%':'NNNWNWNWN','*':'NWNNWNWNN'
+};
+function _code39Clean(v){ return String(v==null?'':v).toUpperCase().replace(/[^0-9A-Z\-. $\/+%]/g,''); }
+function _code39Width(v, nw, ratio){
+  const data = '*' + _code39Clean(v) + '*';
+  const ww = nw*ratio; let w = 0;
+  for (let i=0;i<data.length;i++){
+    const p = _CODE39[data[i]]; if(!p) continue;
+    for (let j=0;j<9;j++){ w += (p[j]==='W')?ww:nw; }
+    w += nw; // narrow inter-character gap
+  }
+  return w;
+}
+function _drawCode39(doc, v, x, y, opts){
+  opts = opts||{};
+  const nw = opts.narrow || 0.4, ratio = opts.ratio || 2.6, h = opts.height || 10;
+  const ww = nw*ratio;
+  const data = '*' + _code39Clean(v) + '*';
+  doc.setFillColor(0,0,0);
+  let cx = x;
+  for (let i=0;i<data.length;i++){
+    const p = _CODE39[data[i]]; if(!p) continue;
+    for (let j=0;j<9;j++){
+      const w = (p[j]==='W')?ww:nw;
+      if (j%2===0) doc.rect(cx, y, w, h, 'F'); // even element = bar
+      cx += w;
+    }
+    cx += nw; // inter-character gap
+  }
+  return cx - x;
+}
+
 // ─── EXPORTS ──────────────────────────────────────────────────────────────────
 function exportPickTicketWord(id, fromArchive=false) {
   const ticket = fromArchive
@@ -2540,7 +2586,7 @@ function exportPickTicketWord(id, fromArchive=false) {
   const _fmtAppt = ticket.appt ? new Date('1970-01-01T'+ticket.appt).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '—';
   const _fmtPickup = ticket.pickupDate ? new Date(ticket.pickupDate+'T00:00:00').toLocaleDateString() : '—';
   doc.text(fmtDate,                                    margin+22, hY+7);
-  doc.text((ticket.orderNum||'—') + (ticket.po?'    ·    PO# '+ticket.po:'') + (ticket.wmsOrder?'    ·    WMS Order # '+ticket.wmsOrder:''),     margin+22, hY+17);
+  doc.text((ticket.orderNum||'—') + (ticket.po?'    ·    PO# '+ticket.po:''),     margin+22, hY+17);
   doc.text((ticket.customer||'—').substring(0,35),     margin+22, hY+27);
   doc.text(_fmtAppt,                                   margin+22, hY+37);
   doc.text(ticket.creator||'—',                        col2+22,   hY+7);
@@ -2548,6 +2594,31 @@ function exportPickTicketWord(id, fromArchive=false) {
   doc.text((ticket.dest||'—').substring(0,35),         col2+22,   hY+27);
   doc.text(_fmtPickup,                                 col2+22,   hY+37);
   if (ticket.notes) doc.text((ticket.notes||'').substring(0,80), margin+16, hY+47);
+
+  // ── WMS ORDER # + BARCODE STRIP ──────────────────────────────────────────
+  // Own row below the header box: number on the left, a large scannable Code 39
+  // barcode of the WMS Order # on the right (sized for long-range scanners). No
+  // human-readable text under the bars — the number already reads on this line.
+  let _wmsTableTop = hY + hH + 4;
+  if (ticket.wmsOrder) {
+    const wY = hY + hH + 3, wmsBoxH = 19;
+    doc.setFillColor(240, 245, 255);
+    doc.setDrawColor(26,82,118); doc.setLineWidth(0.3);
+    doc.rect(margin, wY, pageW-margin*2, wmsBoxH, 'FD');
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(80);
+    doc.text('WMS ORDER #:', margin+4, wY+11);
+    doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(26,82,118);
+    doc.text(String(ticket.wmsOrder), margin+38, wY+11.5);
+    const _bcClean = _code39Clean(ticket.wmsOrder);
+    if (_bcClean) {
+      const _bcH = 13, _bcNarrow = 0.58, _bcRatio = 2.7;   // larger X-dim + taller bars
+      const _bcW = _code39Width(_bcClean, _bcNarrow, _bcRatio);
+      const _bcX = pageW - margin - 6 - _bcW;
+      const _bcY = wY + (wmsBoxH - _bcH)/2;
+      _drawCode39(doc, _bcClean, _bcX, _bcY, {narrow:_bcNarrow, ratio:_bcRatio, height:_bcH});
+    }
+    _wmsTableTop = wY + wmsBoxH + 4;
+  }
 
   // ── SKU TABLE ─────────────────────────────────────────────────────────────
   const tableRows = [];
@@ -2578,7 +2649,7 @@ function exportPickTicketWord(id, fromArchive=false) {
   tableRows.push(['','TOTALS',totalPcs,totalPallets,'','','','','','','','','']);
 
   doc.autoTable({
-    startY: hY + hH + 4,
+    startY: _wmsTableTop,
     margin: { left: margin, right: margin },
     tableWidth: pageW - margin*2,
     showHead: 'everyPage',
