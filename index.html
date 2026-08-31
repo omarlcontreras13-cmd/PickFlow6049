@@ -327,7 +327,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 63;
+const APP_BUILD = 65;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -416,6 +416,7 @@ function listenToFirebase() {
           u.role = data.userSettings[u.id].role || u.role;
           const pwd = data.userSettings[u.id].password;
           u.password = (pwd === '__none__' || pwd === null || pwd === undefined) ? null : pwd;
+          u.perms = data.userSettings[u.id].perms || {};
         }
       });
       // Update current user if their settings changed
@@ -424,6 +425,7 @@ function listenToFirebase() {
         if (updated) {
           state.currentUser.role = updated.role;
           state.currentUser.password = updated.password;
+          state.currentUser.perms = updated.perms || {};
         }
       }
     } else if (data.userRoles) {
@@ -697,6 +699,10 @@ function logout() {
 }
 
 function isAdmin() { return state.currentUser && state.currentUser.role === 'admin'; }
+// Per-user access list. Admins implicitly have every permission; non-admins get a
+// permission only when it's checked on their user profile (perms.<key> === true).
+function userHasPerm(key){ return isAdmin() || !!(state.currentUser && state.currentUser.perms && state.currentUser.perms[key]===true); }
+function canUnarchive(){ return userHasPerm('unarchive'); }
 
 function updateSidebarActions() {
   const nb = document.getElementById('new-ticket-btn');
@@ -801,7 +807,7 @@ function archiveAll(silent=false) {
 }
 
 function restoreTicket(id) {
-  if (!isAdmin()) { showAlert('Only admins can restore tickets.', 'warning'); return; }
+  if (!canUnarchive()) { showAlert('You do not have permission to move tickets back to OPEN. Ask an admin to grant it in User Management.', 'warning'); return; }
   const ticket = state.archivedTickets.find(t => t.id === id);
   if (!ticket) return;
   delete ticket.archivedAt;
@@ -879,7 +885,7 @@ function viewArchivedTicket(id) {
         <button class="btn btn-sm" onclick="exportLoadTag('${id}',true)">🏷 Load Tag</button>
         <button class="btn btn-sm" onclick="exportPickTicketWord('${id}',true)">📄 Pick Ticket</button>
         <button class="btn btn-sm" onclick="window.print()">🖨 Print</button>
-        ${isAdmin() ? `<button class="btn btn-sm" style="border-color:var(--accent2);color:var(--accent2)" onclick="restoreTicket('${id}')">↩ Restore</button>` : ''}
+        ${canUnarchive() ? `<button class="btn btn-sm" style="border-color:var(--accent2);color:var(--accent2)" onclick="restoreTicket('${id}')">↩ Restore</button>` : ''}
       </div>
     </div>
     <div class="section-title">PICK LOCATIONS (READ ONLY)</div>
@@ -1007,6 +1013,10 @@ function showArchiveSettings() {
                 <button onclick="resetPassword('${u.id}')" style="padding:4px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-family:var(--font);font-size:10px;white-space:nowrap">Set Password</button>
                 ${u.password!==null?`<button onclick="clearPassword('${u.id}')" style="padding:4px 10px;border-radius:4px;border:1px solid var(--danger);color:var(--danger);background:transparent;cursor:pointer;font-family:var(--font);font-size:10px;white-space:nowrap">Clear</button>`:''}
               </div>
+              <label style="display:flex;align-items:center;gap:7px;margin-top:6px;font-size:11px;color:var(--text2);cursor:${u.role==='admin'?'default':'pointer'}">
+                <input type="checkbox" onchange="toggleUserPerm('${u.id}','unarchive',this.checked)" ${(u.role==='admin'||(u.perms&&u.perms.unarchive))?'checked':''} ${u.role==='admin'?'disabled':''} style="width:14px;height:14px">
+                <span>Move archived pick tickets back to <strong style="color:var(--text)">Open</strong>${u.role==='admin'?' <span style="color:var(--text2)">(admins always allowed)</span>':''}</span>
+              </label>
             </div>`).join('')}
         </div>
         <div class="modal-actions">
@@ -1064,13 +1074,27 @@ function changeUserRole(userId, newRole) {
   showAlert('✓ ' + user.name + ' role updated to ' + newRole.toUpperCase(), 'success');
 }
 
+function toggleUserPerm(userId, key, checked) {
+  const user = USERS.find(u => u.id === userId);
+  if (!user) return;
+  if (!user.perms) user.perms = {};
+  user.perms[key] = !!checked;
+  if (state.currentUser && state.currentUser.id === userId) {
+    if (!state.currentUser.perms) state.currentUser.perms = {};
+    state.currentUser.perms[key] = !!checked;
+  }
+  syncUserSettingsToFirebase();
+  showAlert('✓ ' + user.name + (checked ? ' granted' : ' revoked') + ': move archived tickets to Open.', 'success');
+}
+
 function syncUserSettingsToFirebase() {
   if (!db) return;
   const userSettings = {};
   USERS.forEach(u => {
     userSettings[u.id] = {
       role: u.role,
-      password: u.password !== null ? u.password : '__none__'
+      password: u.password !== null ? u.password : '__none__',
+      perms: u.perms || {}
     };
   });
   db.ref('settings').set({
@@ -6580,7 +6604,9 @@ function _elxParseShipmentPlan(data){
     const aoa = XLSX.utils.sheet_to_json(wb.Sheets[names[si]], { header:1, defval:'' });
     for (let i=0;i<Math.min(aoa.length,15);i++){
       const norms = (aoa[i]||[]).map(_elxTnorm);
-      if (norms.indexOf('pedido')>=0 && (norms.indexOf('material')>=0 || norms.indexOf('entrega')>=0)){
+      const hasAny = function(al){ return al.some(function(a){ return norms.indexOf(a)>=0; }); };
+      // Accept Spanish (Concentrado / ATL transit) OR English (Atlanta Inbounds in Transit) headers.
+      if (hasAny(['pedido','order']) && (hasAny(['material','materialid']) || hasAny(['entrega','delivery']))){
         found = { sheet:names[si], aoa:aoa, hi:i, norms:norms }; break;
       }
     }
@@ -6588,9 +6614,9 @@ function _elxParseShipmentPlan(data){
   if (!found) return { sheet:(names[0]||''), rows:[] };
   const norms = found.norms;
   const col = function(al){ for (let i=0;i<norms.length;i++){ if (al.indexOf(norms[i])>=0) return i; } return -1; };
-  const ci = { pedido:col(['pedido']), factura:col(['factura']), entrega:col(['entrega']),
-    material:col(['material']), desc:col(['nombremateria','nombrematerial']), lote:col(['lote']),
-    cant:col(['cantidad']), pall:col(['ctdpall']) };
+  const ci = { pedido:col(['pedido','order']), factura:col(['factura','invoice']), entrega:col(['entrega','delivery']),
+    material:col(['material','materialid']), desc:col(['nombremateria','nombrematerial','materialdescription']), lote:col(['lote','lot']),
+    cant:col(['cantidad','cases','cantidadcajas']), pall:col(['ctdpall','pallets','sumofpallets','pallet']) };
   const g = function(r,i){ return i>=0 ? r[i] : ''; };
   const rows = [];
   for (let i=found.hi+1;i<found.aoa.length;i++){
@@ -6651,7 +6677,7 @@ function showEdi(){
   const _addlFiles = (window._elxSrc && window._elxSrc.addlFiles) ? window._elxSrc.addlFiles : [];
   const addlLine = _addlFiles.length
     ? '<span style="color:var(--accent2)">✓ Additional source(s): '+_addlFiles.join(', ')+'</span> — merged into the base data'
-    : '<span style="color:var(--text2)">Optional — also drop a shipment-plan XLSX (e.g. ATL transit) to widen the base data. Import the Concentrado first, then additional files.</span>';
+    : '<span style="color:var(--text2)">Optional — also drop a shipment-plan XLSX (e.g. ATL transit or Atlanta Inbounds in Transit) to widen the base data. Import the Concentrado first, then additional files.</span>';
   document.getElementById('main-panel').innerHTML = `
     <div class="section-title">EDI · ELECTROLIT INBOUND</div>
     <div id="edi-dup-warn"></div>
@@ -6675,7 +6701,7 @@ function showEdi(){
       </div>
       <div style="font-size:11px;margin-top:8px">${srcLine}</div>
       <div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:8px">
-        <div style="font-size:11px;color:var(--text2);margin-bottom:4px">ADDITIONAL SOURCE (optional) — shipment-plan XLSX (e.g. ATL transit), read as extra base data</div>
+        <div style="font-size:11px;color:var(--text2);margin-bottom:4px">ADDITIONAL SOURCE (optional) — shipment-plan XLSX (e.g. ATL transit or Atlanta Inbounds in Transit), read as extra base data</div>
         <div id="elx-addl-drop" ondragover="event.preventDefault();this.style.borderColor='#2e7d32'" ondragleave="this.style.borderColor=''" ondrop="event.preventDefault();this.style.borderColor='';_elxAddlImport({target:{files:event.dataTransfer.files}})" onclick="document.getElementById('elx-addl-input').click()"
              style="border:1.5px dashed var(--border);border-radius:6px;padding:12px;text-align:center;color:var(--text2);cursor:pointer;font-size:12px">
           Drop or click to add a shipment-plan XLSX — merged into the same source data (Order / PO / Lot)
