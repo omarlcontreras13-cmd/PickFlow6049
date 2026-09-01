@@ -327,7 +327,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 66;
+const APP_BUILD = 67;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -4915,7 +4915,10 @@ function renderAdjTable() {
         <td id="adj-net-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold">—</td>
         <td id="adj-act-${idx}" style="padding:7px 10px;text-align:right;font-weight:bold;color:var(--accent)">${r.expPallets||0}</td>
         <td id="adj-acc-${idx}" style="padding:7px 10px;text-align:center;font-size:11px;font-weight:bold;color:var(--accent2)">✓ ACCURATE</td>
-        <td id="adj-cacc-${idx}" style="padding:7px 10px;text-align:center;font-weight:bold;color:var(--accent2)">100%</td>
+        <td style="padding:7px 10px;text-align:center;white-space:nowrap">
+          <input type="checkbox" id="adj-good-${idx}" ${(r.notes||'').trim().toUpperCase()==='GOOD'?'checked':''} onchange="_ccAdjGood(${idx},this.checked)" title="Mark this count GOOD — 100%, good to go (writes GOOD in Notes)" style="width:14px;height:14px;vertical-align:middle;margin-right:6px;cursor:pointer">
+          <span id="adj-cacc-${idx}" style="font-weight:bold;color:var(--accent2)">100%</span>
+        </td>
         <td style="padding:7px 10px;white-space:nowrap">
           <input id="adj-notes-${idx}" type="text" value="${(r.notes||'').replace(/"/g,'&quot;')}" placeholder="Notes..."
             style="width:150px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 8px;color:var(--text);font-family:var(--font);font-size:11px;outline:none">${removeBtn}
@@ -4923,6 +4926,15 @@ function renderAdjTable() {
       </tr>`;
   });
   tbody.innerHTML = html;
+}
+
+// Checkbox in the COUNT ACCURACY cell — writes "GOOD" into that row's Notes to
+// mark the location good-to-go at 100%. Unchecking clears it (only if it's "GOOD").
+function _ccAdjGood(idx, checked){
+  const n = document.getElementById('adj-notes-'+idx);
+  const rows = window._ccAdjRows || [];
+  if (checked){ if(n) n.value='GOOD'; if(rows[idx]) rows[idx].notes='GOOD'; }
+  else { if(n && (n.value||'').trim().toUpperCase()==='GOOD'){ n.value=''; if(rows[idx]) rows[idx].notes=''; } }
 }
 
 // Add a location (typically empty / uncounted) so found inventory can be recorded.
