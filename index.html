@@ -327,7 +327,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 65;
+const APP_BUILD = 66;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -4194,6 +4194,22 @@ function startCycleCount() {
 
 function updateVar(idx) { /* legacy — kept for compatibility */ }
 
+// Find a cycle-count session in the live node OR any archived month, and return
+// both the session and its exact DB path so edits (adjustments) write back to the
+// right place — back-dated / prior-month archived sessions included.
+function _ccFindSession(id, cb){
+  if (!db){ const s=(window._ccLastSession && window._ccLastSession.id===id)?window._ccLastSession:null; cb(s, s?('cycleCount6049/'+id):null); return; }
+  db.ref('cycleCount6049/'+id).once('value', function(snap){
+    const s = snap.val();
+    if (s){ cb(s, 'cycleCount6049/'+id); return; }
+    db.ref('cycleCountArchive6049').once('value', function(asnap){
+      const arch = asnap.val() || {};
+      for (const mk in arch){ if (arch[mk] && arch[mk][id]){ cb(arch[mk][id], 'cycleCountArchive6049/'+mk+'/'+id); return; } }
+      cb(null, null);
+    }, function(){ cb(null, null); });
+  }, function(){ cb(null, null); });
+}
+
 function viewCCSession(id) {
   if (!db) return;
   db.ref('cycleCount6049/'+id).once('value', snap=>{
@@ -4240,10 +4256,9 @@ function toggleAllLocSections(expand) {
 }
 
 function printCCCountSheet(sessionId) {
-  // Find session from Firebase then render print window
+  // Find session in the live node OR the archive, then render print window
   if (!db) { showAlert('Not connected.','warning'); return; }
-  db.ref('cycleCount6049/' + sessionId).once('value', snap => {
-    const session = snap.val();
+  _ccFindSession(sessionId, function(session){
     if (!session) { showAlert('Session not found.','warning'); return; }
     _renderCCPrintWindow(session);
   });
@@ -4675,9 +4690,8 @@ function showCCCountSheetView(sessionId) {
   };
 
   if (db) {
-    db.ref('cycleCount6049/'+sessionId).once('value', snap => {
-      const s = snap.val();
-      if (s) load(s);
+    _ccFindSession(sessionId, function(s, path){
+      if (s){ s._dbPath = path; load(s); }
       else showAlert('Session not found.','warning');
     });
   } else if (window._ccLastSession) {
@@ -4833,9 +4847,8 @@ function showCCAdjustments(sessionId) {
   };
 
   if (db) {
-    db.ref('cycleCount6049/'+sessionId).once('value', snap => {
-      const s = snap.val();
-      if (s) load(s);
+    _ccFindSession(sessionId, function(s, path){
+      if (s){ s._dbPath = path; load(s); }
       else showAlert('Session not found.','warning');
     });
   } else if (window._ccLastSession) {
@@ -5036,9 +5049,10 @@ function saveAdjustments() {
 
   const counterName = ((document.getElementById('adj-counter-name')||{}).value||'').trim();
 
+  const base = session._dbPath || ('cycleCount6049/'+session.id);   // archived (prior-month) sessions write back to their archive path
   const updates = {};
-  updates['cycleCount6049/'+session.id+'/adjustments'] = adjustments;
-  updates['cycleCount6049/'+session.id+'/counterName'] = counterName;
+  updates[base+'/adjustments'] = adjustments;
+  updates[base+'/counterName'] = counterName;
 
   db.ref().update(updates)
     .then(() => {
