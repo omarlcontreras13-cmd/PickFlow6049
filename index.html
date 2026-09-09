@@ -20,14 +20,17 @@
     --success: #1a9e7a; --warning: #d97706;
     --font: 'Courier New', monospace;
   }
-  body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); height: 100vh; margin: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .header { flex-shrink: 0; }
   .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
   .logo { font-size: 18px; font-weight: bold; letter-spacing: 2px; color: var(--accent); }
   .logo span { color: var(--accent2); }
   .status-bar { display: flex; gap: 16px; font-size: 11px; color: var(--text2); }
   .status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--success); margin-right: 6px; animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-  .main { display: grid; grid-template-columns: 280px 1fr; height: calc(100vh - 57px); }
+  .main { display: grid; grid-template-columns: 280px 1fr; flex: 1; min-height: 0; }
+  /* Data Preview: keep each table's column header visible while its rows scroll. */
+  #pcontent table thead th { position: sticky; top: 0; background: var(--surface); z-index: 2; }
   .sidebar { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
   .sidebar-header { padding: 16px; border-bottom: 1px solid var(--border); font-size: 11px; letter-spacing: 1px; color: var(--text2); text-transform: uppercase; }
   .sidebar-actions { padding: 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); }
@@ -327,7 +330,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 67;
+const APP_BUILD = 71;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -2110,6 +2113,8 @@ function showDashboard() {
   const totalLocs=[...new Set(state.helper.map(h=>h.location))].length;
   const totalPallets=state.helper.reduce((s,h)=>s+h.availPallets,0);
   document.getElementById('main-panel').innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100%;min-height:0">
+    <div style="flex-shrink:0">
     <div class="section-title">SYSTEM OVERVIEW</div>
     <div class="stats-grid">
       <div class="stat-card"><div class="stat-label">Inventory Records</div><div class="stat-value">${state.inventory.length.toLocaleString()}</div></div>
@@ -2117,7 +2122,9 @@ function showDashboard() {
       <div class="stat-card"><div class="stat-label">Available Locations</div><div class="stat-value">${totalLocs}</div></div>
       <div class="stat-card"><div class="stat-label">Total Pallets Avail</div><div class="stat-value yellow">${totalPallets}</div></div>
     </div>
-    <div class="section-title">OPEN TICKETS</div>
+    <div class="section-title" style="margin-bottom:8px">OPEN TICKETS</div>
+    </div>
+    <div style="flex:1;min-height:0;overflow-y:auto;padding-right:4px">
     ${state.tickets.length===0
       ? '<div class="alert alert-info">No pick tickets yet. Click "+ New Pick Ticket" to start.</div>'
       : state.tickets.map(t=>`
@@ -2136,7 +2143,9 @@ function showDashboard() {
               <div style="font-size:11px;color:var(--text2);margin-top:3px">${ticketStampLine(t)}</div>
             </div>
           </div>
-        </div>`).join('')}`;
+        </div>`).join('')}
+    </div>
+    </div>`;
 }
 
 // ─── NEW TICKET ───────────────────────────────────────────────────────────────
@@ -4098,10 +4107,10 @@ function startCycleCount() {
   selected.forEach(loc => { locData[loc] = []; });
   state.inventory.forEach(r => {
     if (!selected.includes(r.location)) return;
-    if ((r.pcsPending||0) > 0) return;
-    if (window._ccCustFilter && window._ccCustFilter!=='__all__' && (r.customer||'')!==window._ccCustFilter) return;   // customer filter — inert unless a customer is chosen
-    if (window._ccSkuFilter && window._ccSkuFilter!=='__all__' && (r.sku||'')!==window._ccSkuFilter) return;          // SKU filter — inert unless a SKU is chosen
-    if (window._ccLotSet && window._ccLotSet.size && !window._ccLotSet.has((r.lot||'').trim().toUpperCase())) return; // lot filter — inert unless lots are checked (ANY of them)
+    if ((r.pcsPending||0) > 0) return;   // Available only — picked/allocated pallets are excluded
+    // The customer/SKU/lot filters narrow the LOCATION PICKER only — they must NOT scope the
+    // count itself. A physical bin count lists EVERY available roll in the selected bin, so the
+    // sheet always matches Raw Data for that location. (Do not re-add per-row filtering here.)
     locData[r.location].push(r);
   });
 
@@ -5846,6 +5855,8 @@ function showDataPreview() {
   };
 
   document.getElementById('main-panel').innerHTML=`
+   <div style="height:100%;display:flex;flex-direction:column">
+    <div style="flex-shrink:0">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
       <div class="section-title" style="margin:0;border:none">DATA IMPORT PREVIEW</div>
       <button class="btn btn-sm" onclick="showDashboard()">← Back</button>
@@ -5857,7 +5868,9 @@ function showDataPreview() {
       <div class="stat-card"><div class="stat-label">QTY Guide SKUs</div><div class="stat-value yellow">${Object.keys(state.qtyGuide).length}</div></div>
     </div>
     <div id="ptabs" style="display:flex;gap:8px;margin-bottom:16px"></div>
-    <div id="pcontent" style="overflow-x:auto"></div>`;
+    </div>
+    <div id="pcontent" style="flex:1;min-height:0;overflow:auto"></div>
+   </div>`;
   window.switchTab('locations');
 }
 
