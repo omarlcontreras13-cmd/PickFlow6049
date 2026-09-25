@@ -330,7 +330,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 73;
+const APP_BUILD = 74;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -3080,6 +3080,13 @@ function isCCStaging(loc){
   const p = String(loc==null?'':loc).trim().toUpperCase().split('-');
   return p.length>=2 && /^0+$/.test(p[p.length-1]);
 }
+// This app is the 6049 facility — it owns the 22-series aisles. 23-series bins belong to
+// 6021. Guard against any cross-facility rows (a mis-keyed location, an old session, a
+// custom-added bin) leaking into 6049 Cycle Count and ballooning into a phantom grid.
+const CC_FOREIGN_PREFIX = '23';
+function isOtherFacilityLoc(loc){
+  return new RegExp('^'+CC_FOREIGN_PREFIX+'-').test(String(loc==null?'':loc).trim());
+}
 function inventoryAccuracyStats(excludeStaging) {
   // Use the FULL inventory set. 6049 keeps every row (incl. cycle-count/ghost/excluded
   // locations) in rawInventory; state.inventory is the picking-filtered subset and would
@@ -3216,6 +3223,7 @@ function showCycleCountStart() {
     });
     // Generate every aisle/bay combo using the global max bay so no aisle is short-changed
     Object.entries(prefixGroups).forEach(([prefix, g]) => {
+      if (String(prefix) === CC_FOREIGN_PREFIX) return;   // never generate the other facility's grid
       for (let a = 0; a <= g.maxAisle; a++) {
         const aisleStr = String(a).padStart(2,'0');
         const maxB = g.globalMaxBay || 0;  // use global max so sparse aisles get full range
@@ -3231,7 +3239,7 @@ function showCycleCountStart() {
 
     // Filter skip locs
     const allLocs     = [...locSet].sort();
-    const storageLocs = allLocs.filter(l => !isCCStaging(l) && !SKIP_LOCS.some(p => l.toUpperCase().includes(p.toUpperCase())));
+    const storageLocs = allLocs.filter(l => !isCCStaging(l) && !isOtherFacilityLoc(l) && !SKIP_LOCS.some(p => l.toUpperCase().includes(p.toUpperCase())));
 
     // Month window
     const now        = new Date();
@@ -3278,7 +3286,7 @@ function showCycleCountStart() {
     const locLastPutaway = {};
     state.inventory.forEach(r => {
       const loc = (r.location||'').toUpperCase();
-      if (!r.location || isCCStaging(r.location) || SKIP_LOCS.some(p => loc.includes(p.toUpperCase()))) return;
+      if (!r.location || isCCStaging(r.location) || isOtherFacilityLoc(r.location) || SKIP_LOCS.some(p => loc.includes(p.toUpperCase()))) return;
       if ((r.pcsPending||0) > 0) return;
       if (r.dateRecd) {
         const t = r.dateRecd instanceof Date ? r.dateRecd.getTime() : new Date(r.dateRecd).getTime();
@@ -3689,7 +3697,7 @@ function showCCTracker() {
   const locSet2 = new Set(window._ccHistoricLocs || []);
   state.inventory.forEach(r => { if (r.location) locSet2.add(r.location); });
   const allLocs     = [...locSet2].sort();
-  const storageLocs = allLocs.filter(l => !isCCStaging(l) && !SKIP_LOCS.some(p=>l.toUpperCase().includes(p.toUpperCase())));
+  const storageLocs = allLocs.filter(l => !isCCStaging(l) && !isOtherFacilityLoc(l) && !SKIP_LOCS.some(p=>l.toUpperCase().includes(p.toUpperCase())));
 
   const now = new Date();
   const year  = now.getFullYear();
