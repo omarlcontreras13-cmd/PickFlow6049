@@ -330,7 +330,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 74;
+const APP_BUILD = 75;
 const VERSION_PATH = 'appVersion';
 function _versionDoReload(remote){
   const a=document.activeElement;
@@ -4366,7 +4366,11 @@ function _renderCCPrintWindow(session) {
       <td class="num">${locPcs.toLocaleString()}</td>
       <td></td>
     </tr>`;
-    rows += `</tbody></table></div>`;
+    // Repeating footer band — the location prints at the bottom of EVERY page this
+    // location spans, so multi-page count sheets are always identifiable.
+    rows += `</tbody>
+      <tfoot class="loc-foot"><tr><td colspan="10" class="loc-foot-cell">📍 LOCATION ${loc}</td></tr></tfoot>
+      </table></div>`;
   });
 
   const dateStr = new Date(session.createdAt).toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric'});
@@ -4412,6 +4416,8 @@ function _renderCCPrintWindow(session) {
     .checkbox { display: inline-block; width: 12px; height: 12px;
       border: 1.5px solid #555; border-radius: 2px; }
     .notes-cell { background: #fafafa; }
+    .loc-foot-cell { background: #333; color: #fff; font-weight: bold; font-size: 9pt;
+      letter-spacing: 1px; text-align: center; padding: 5px 4px; border: 1px solid #555; }
     .grand-total-block { margin-top: 20px; border: 2px solid #333;
       border-radius: 4px; padding: 10px 16px; background: #f9f9f9;
       display: flex; justify-content: space-between; align-items: center; }
