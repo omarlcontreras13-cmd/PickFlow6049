@@ -330,7 +330,7 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 77;
+const APP_BUILD = 84;
 const VERSION_PATH = 'appVersion';
 // A downloaded copy opened as a local file (file://) is a TEST build. The LIVE app is served
 // over http(s). A test build NEVER publishes its version or auto-reloads, so opening it to
@@ -529,7 +529,7 @@ function listenToFirebase() {
   _ediListen();
 }
 
-const EXCLUDED = ['22-19','22-20','22-21','22-22','22-23','22-TR','22-RR','22-CYCLE','22-REWORK'];
+const EXCLUDED = ['22-17','22-18','22-19','22-20','22-21','22-22','22-23','22-TR','22-RR','22-CYCLE','22-REWORK'];
 const MAX_TICKETS = 20;
 const LOCS_PER_ROW = 4;
 const NEXUS_SKUS = ['RMBEST','RMBETTER','RMGOOD'];
@@ -544,6 +544,7 @@ let state = {
   qtyGuide: {},
   skuNames: {},
   helper: [],
+  helperOld: [],
   tickets: [],
   archivedTickets: [],
   activeTicket: null,
@@ -1373,6 +1374,7 @@ function createNexusPickTicket() {
       pickupDate: document.getElementById('nxd-pickup').value,
       notes: document.getElementById('nxd-notes').value.trim(),
       created: Date.now(),
+      pickRev: PICK_REV,   // new pick-logic order (actual bins before General/TR/RR, then Date Received)
       skus: [{sku:'',pcs:0}]
     };
     state.tickets.push(ticket);
@@ -1793,48 +1795,86 @@ function processImport(wb) {
     return;
   }
 
-  // Daily inventory: auto-detect header row by finding 'SKU' in first 10 rows
+  // Daily inventory: auto-detect the DATA sheet + header row. A real inventory sheet has
+  // SKU, Pcs AND Location together in one header row. Requiring all three skips pivot/summary
+  // tabs — e.g. a workbook whose first tab is just "SKU | 4058130" totals — which would
+  // otherwise hijack the import and leave the real data (on another tab) unread.
+  const _hnorm = s => String(s).toLowerCase().replace(/[\s.'’#\-_/]/g,'');
+  const _rowHas = (row, needs) => needs.every(alts => row.some(c => { const n=_hnorm(c); return alts.includes(n); }));
   let dataSheet = null, headerRowIdx = -1;
   for (const name of sheets) {
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header:1, defval:'' });
-    for (let i = 0; i < Math.min(10, rows.length); i++) {
-      if (rows[i].some(c => typeof c==='string' && c.trim().toUpperCase()==='SKU')) {
+    for (let i = 0; i < Math.min(15, rows.length); i++) {
+      if (_rowHas(rows[i], [['sku','item','itemnumber','itemno'],
+                            ['pcs','pieces','piececount'],
+                            ['location','loc','bin','binlocation']])) {
         dataSheet = wb.Sheets[name]; headerRowIdx = i; break;
       }
     }
     if (dataSheet) break;
   }
-  if (!dataSheet) { showAlert('Could not find SKU column in this file. Check the file format.', 'danger'); return; }
+  // Fallback for legacy single-column templates: first sheet with just a SKU header.
+  if (!dataSheet) {
+    for (const name of sheets) {
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header:1, defval:'' });
+      for (let i = 0; i < Math.min(15, rows.length); i++) {
+        if (rows[i].some(c => typeof c==='string' && c.trim().toUpperCase()==='SKU')) {
+          dataSheet = wb.Sheets[name]; headerRowIdx = i; break;
+        }
+      }
+      if (dataSheet) break;
+    }
+  }
+  if (!dataSheet) { showAlert('Could not find an inventory data sheet (need SKU, Pcs and Location columns). Check the file format.', 'danger'); return; }
 
   const allRows = XLSX.utils.sheet_to_json(dataSheet, { header:1, defval:'', raw:false });
   const hdr = allRows[headerRowIdx];
   const ci = {};
   hdr.forEach((h,i) => { if(h) ci[h.toString().trim()] = i; });
 
-  const skuI = ci['SKU'] ?? -1;
-  const pcsI = ci['Pcs'] ?? -1;
-  const locI = ci['Location'] ?? -1;
-  const expI = ci['Expiration Date'] ?? -1;
-  const stKey = Object.keys(ci).find(k => k.toLowerCase().includes('inventory status'));
-  const stI = stKey ? ci[stKey] : -1;
-  const pcsPendKey = Object.keys(ci).find(k => k.toLowerCase().replace(' ','').includes('pcspending'));
-  const pcsPendI = pcsPendKey !== undefined ? ci[pcsPendKey] : -1;
-  const lotI = ci['Lot #'] !== undefined ? ci['Lot #'] : -1;
-  const skidI = ci['SkidID'] !== undefined ? ci['SkidID'] : -1;
-  const poI = ci['PO #'] !== undefined ? ci['PO #'] : -1;
-  const grossWtI = ci['Gross Weight'] !== undefined ? ci['Gross Weight'] : -1;
-  const bolI = ci['Inbound BOL'] !== undefined ? ci['Inbound BOL'] : -1;
+  // ── Case/format-tolerant column resolver ──────────────────────────────────
+  // WMS extracts and our own Raw Data export label columns differently
+  // ("EXP DATE" vs "Expiration Date", "PCS" vs "Pcs", "LOCATION" vs "Location").
+  // Normalize every header (lowercase, strip spaces + punctuation) so a column is
+  // matched regardless of case/spacing. This is what keeps FEFO/FIFO from silently
+  // breaking when a header name doesn't match character-for-character — the root
+  // cause of picks that ignored expiration dates.
+  const _norm = s => String(s).toLowerCase().replace(/[\s.'’#\-_/]/g,'');
+  const _ciN = {};
+  Object.keys(ci).forEach(k => { const n=_norm(k); if(_ciN[n]===undefined) _ciN[n]=ci[k]; });
+  const col = (exacts, contains) => {
+    for (const e of exacts) { const n=_norm(e); if(_ciN[n]!==undefined) return _ciN[n]; }
+    if (contains) { for (const key of Object.keys(_ciN)) { if(contains.some(c=>key.includes(c))) return _ciN[key]; } }
+    return -1;
+  };
+
+  const skuI     = col(['SKU','Item','Item Number','Item No']);
+  const pcsI     = col(['Pcs','Pieces','Piece Count','Qty On Hand','On Hand Qty']);
+  const locI     = col(['Location','Loc','Bin','Bin Location']);
+  const expI     = col(['Expiration Date','Exp Date','Expiration','Expire Date','Expiry Date','Expiry','Best By','Best By Date','Best Before']); // FEFO driver
+  const stI      = col(['Inventory Status','Status'], ['inventorystatus','status']);
+  const pcsPendI = col(['Pcs Pending','Pieces Pending'], ['pcspending','piecespending','pending']);
+  const lotI     = col(['Lot #','Lot','Lot Number','Lot No']);
+  const skidI    = col(['SkidID','Skid ID','Skid','Pallet ID','Skid No']);
+  const poI      = col(['PO #','PO','PO Number','PO No','Purchase Order']);
+  const grossWtI = col(['Gross Weight','Gross Wt','Weight']);
+  const bolI     = col(['Inbound BOL','BOL','BOL Number','Inbound BOL Number']);
   // Prod ID 2 carries the PO reference for Nexus inventory (system PO# column not reliably mapped yet)
-  const prodId2Key = Object.keys(ci).find(k => { const n=k.toLowerCase().replace(/[\s.]/g,''); return n==='prodid2'||n==='productid2'; });
-  const prodId2I = prodId2Key !== undefined ? ci[prodId2Key] : -1;
+  const prodId2I = col(['Prod ID 2','Product ID 2','ProdID2']);
   // Customer/Owner column from the WMS extract — source of truth for which customer the rows belong to (same as 6021)
-  const custKey = Object.keys(ci).find(k => { const n=k.toLowerCase().trim(); return n==='customer'||n==='owner'||n==='client'||n==='customer name'||n==='cust'; });
-  const custI = custKey !== undefined ? ci[custKey] : -1;
-  // Product ID / item name column (the descriptive name). Must NOT collide with "Prod ID 2".
-  const nameKey = Object.keys(ci).find(k => { const n=k.toLowerCase().replace(/[\s.]/g,''); return n==='productid'||n==='productname'||n==='name'||n==='description'||n==='itemdescription'||n==='item'||n==='flavor'; });
-  const nameI = nameKey !== undefined ? ci[nameKey] : -1;
-  // Date received / put-away date — drives the "recent put-away" suggestions (same as 6021's Date Rec'd)
-  const dateRecdKey = Object.keys(ci).find(k => { const n=k.toLowerCase().replace(/[\s.'’]/g,''); return n==='daterecd'||n==='daterecvd'||n==='datereceived'||n==='receiveddate'||n==='recddate'||n==='putawaydate'||n==='putawaydate'||n==='datein'; });
+  const custI    = col(['Customer','Owner','Client','Customer Name','Cust']);
+  // Product ID / item name column (the descriptive name). Resolved AFTER Prod ID 2 so it never steals that column.
+  let nameI      = col(['Name','Product Name','Description','Item Description','Flavor','Product ID']);
+  if (nameI === prodId2I) nameI = -1;
+  // Date received / put-away date — drives FEFO→FIFO tiebreak AND the Raw Data "Date Rec'd" column.
+  // Broad matcher: WMS extracts label this column many ways (Receipt Date, Recv'd Date, Date Received,
+  // Put Away Date, etc.). Strip spaces/punctuation, then accept any receipt/put-away variant.
+  const dateRecdKey = Object.keys(ci).find(k => {
+    const n = k.toLowerCase().replace(/[\s.'’#\-_/]/g,'');
+    if (n.includes('receipt') || n.includes('putaway')) return true;
+    return ['daterecd','daterecvd','datereceived','receiveddate','recddate','recvddate',
+            'recvdate','recdate','received','recvd','recd','datein','dtrecd','indate'].includes(n);
+  });
   const dateRecdI = dateRecdKey !== undefined ? ci[dateRecdKey] : -1;
 
   if (skuI<0 || pcsI<0 || locI<0) {
@@ -1876,9 +1916,10 @@ function processImport(wb) {
 
     // Additional filters for picking helper only
     if (st && st !== 'AVAILABLE') continue;
+    if (st === 'GHOST' || loc.toUpperCase().includes('GHOST')) continue; // never direct picks to a ghost/phantom bin
     if (EXCLUDED.some(ex => {
       const l = loc.toUpperCase(), e = ex.toUpperCase();
-      if (ex === '22-19' || ex === '22-20') return l.startsWith(e);
+      if (ex === '22-17' || ex === '22-18' || ex === '22-19' || ex === '22-20') return l.startsWith(e);
       return l.includes(e);
     })) continue;
     if (pcsPend > 0) continue;
@@ -1918,25 +1959,45 @@ function parseExpDate(v) {
 }
 
 // ─── HELPER BUILD ─────────────────────────────────────────────────────────────
-function buildHelperFrom(inv) {
+// Pick-logic version. New tickets are stamped with PICK_REV so the newer sort (actual bins
+// before General/TR/RR, then Date Received) applies ONLY to them; tickets already in process
+// (no pickRev, or a lower one) keep the original FEFO→location-name order and don't shift.
+const PICK_REV = 2;
+// A "non-actual" overflow bin: General, Transfer (TR) or Return/Rework (RR) staging. These
+// are picked only after real rack locations of the same expiration are exhausted.
+function _isOverflowLoc(loc){
+  const parts = String(loc==null?'':loc).toUpperCase().split('-');
+  return parts.some(p => p==='GENERAL' || p==='TR' || p==='RR');
+}
+function buildHelperFrom(inv, useNewSort) {
   const locData = {};
   inv.forEach(row => {
     const pq = state.qtyGuide[row.sku];
     if (!pq || row.pcs !== pq) return;
     const key = row.sku+'|'+row.location;
-    if (!locData[key]) locData[key] = { sku:row.sku, location:row.location, expDates:[] };
+    if (!locData[key]) locData[key] = { sku:row.sku, location:row.location, expDates:[], recdDates:[] };
     locData[key].expDates.push(row.expDate);
+    locData[key].recdDates.push(row.dateRecd);
   });
   const locList = Object.values(locData).map(d => ({
     sku:d.sku, location:d.location,
     oldestExp: d.expDates.filter(Boolean).sort((a,b)=>a-b)[0]||null,
+    earliestRecd: d.recdDates.filter(Boolean).sort((a,b)=>a-b)[0]||null,   // oldest Date Received at this location
+    overflow: _isOverflowLoc(d.location),
     allExps: d.expDates
   }));
   locList.sort((a,b) => {
     if (a.sku!==b.sku) return a.sku.localeCompare(b.sku);
     const ea = a.oldestExp?a.oldestExp.getTime():0, eb = b.oldestExp?b.oldestExp.getTime():0;
-    if (ea!==eb) return ea-eb;
-    return a.location.localeCompare(b.location);
+    if (ea!==eb) return ea-eb;                                             // 1) FEFO: earliest EXP DATE first — ALWAYS primary
+    if (useNewSort) {
+      const ra = a.earliestRecd?a.earliestRecd.getTime():Infinity, rb = b.earliestRecd?b.earliestRecd.getTime():Infinity;
+      if (ra!==rb) return ra-rb;                                           // 2) FIFO: earliest Date Rec'd first (across ALL locations)
+      const na = a.allExps.length, nb = b.allExps.length;
+      if (na!==nb) return na-nb;                                           // 3) tiebreaker: location with the LEAST amount first (empty small bins first)
+      if (a.overflow!==b.overflow) return a.overflow?1:-1;                 // 4) safety: actual rack bins before General/TR/RR
+    }
+    return a.location.localeCompare(b.location);                          // 5) final tiebreaker: location name
   });
   const skuLocs = {};
   locList.forEach(l => { if(!skuLocs[l.sku]) skuLocs[l.sku]=[]; skuLocs[l.sku].push(l); });
@@ -1957,14 +2018,16 @@ function buildHelperFrom(inv) {
   return helper;
 }
 function buildHelper() {
-  state.helper = buildHelperFrom(state.inventory);
+  state.helper    = buildHelperFrom(state.inventory, true);    // NEW sort — default / new tickets (pickRev >= PICK_REV)
+  state.helperOld = buildHelperFrom(state.inventory, false);   // ORIGINAL sort — tickets already in process
 }
+// Which helper a ticket picks from: new tickets use the new sort, in-process tickets the original.
+function _ticketUsesNewPick(t){ return !!(t && (t.pickRev||0) >= PICK_REV); }
 
 // ─── ALLOCATIONS ─────────────────────────────────────────────────────────────
 // poNorm = normalized PO# for PO-scoped (Nexus) tickets, or null for standard SKU tickets.
 // Standard tickets only consume from prior standard tickets; PO tickets only from prior tickets on the SAME PO#.
-function getAllocatedBefore(ticketId, helper, poNorm) {
-  helper = helper || state.helper;
+function getAllocatedBefore(ticketId, poNorm) {
   poNorm = poNorm || null;
   const alloc = {};
   const sorted = [...state.tickets].sort((a,b) => a.created - b.created);
@@ -1973,6 +2036,12 @@ function getAllocatedBefore(ticketId, helper, poNorm) {
     const tPo = (t.po||'').trim();
     if (poNorm) { if (tPo !== poNorm) continue; }
     else { if (tPo) continue; }
+    // Each prior ticket consumed inventory in ITS OWN pick order (new vs original), so replay
+    // it with the matching helper — this keeps availability correct across mixed-version tickets.
+    const useNew = _ticketUsesNewPick(t);
+    const helper = poNorm
+      ? buildHelperFrom(state.inventory.filter(r => (r.prodId2||'').trim() === poNorm), useNew)
+      : (useNew ? state.helper : state.helperOld);
     t.skus.forEach(sr => {
       if (!sr.sku || !sr.pcs) return;
       const pq = state.qtyGuide[sr.sku]; if (!pq) return;
@@ -2018,14 +2087,15 @@ function addSkuToGuide(sku, ticketId){
 function computeTicketLocations(ticket) {
   // PO-scoped (Nexus) ticket: rank only the inventory carrying this PO#, otherwise identical logic.
   const poNorm = (ticket.po||'').trim();
+  const useNew = _ticketUsesNewPick(ticket);   // new tickets: actual-before-overflow + Date Received; in-process: original order
   let helper, prior;
   if (poNorm) {
     // Nexus PO reference lives in Prod ID 2 on the inventory rows (system PO# column not reliably mapped)
-    helper = buildHelperFrom(state.inventory.filter(r => (r.prodId2||'').trim() === poNorm));
-    prior  = getAllocatedBefore(ticket.id, helper, poNorm);
+    helper = buildHelperFrom(state.inventory.filter(r => (r.prodId2||'').trim() === poNorm), useNew);
+    prior  = getAllocatedBefore(ticket.id, poNorm);
   } else {
-    helper = state.helper;
-    prior  = getAllocatedBefore(ticket.id, helper, null);
+    helper = useNew ? state.helper : state.helperOld;
+    prior  = getAllocatedBefore(ticket.id, null);
   }
   return ticket.skus.map(sr => {
     if (!sr.sku) return { ...sr, palletsNeeded:0, locations:[], rows:[], error:null };
@@ -2254,6 +2324,7 @@ function createTicket() {
     pickupDate: document.getElementById('nd-pickup').value,
     notes: document.getElementById('nd-notes').value.trim(),
     created: Date.now(),
+    pickRev: PICK_REV,   // new pick-logic order (actual bins before General/TR/RR, then Date Received)
     skus: [{sku:'',pcs:0}]
   };
   state.tickets.push(ticket);
@@ -3047,7 +3118,7 @@ function applyInvFilter(field, value) {
     `<table class="sku-table" style="font-size:11px"><thead><tr>
       <th>CUSTOMER</th><th>SKU</th><th>NAME</th><th>PO #</th><th>PCS</th><th>PCS PENDING</th>
       <th>STATUS</th><th>LOT #</th><th>SKID ID</th><th>LOCATION</th>
-      <th>EXP DATE</th><th>GROSS WT</th><th>INBOUND BOL</th>
+      <th>EXP DATE</th><th>DATE REC'D</th><th>GROSS WT</th><th>INBOUND BOL</th>
     </tr></thead><tbody>` +
     (sl.length ? sl.map(r=>`<tr>
       <td style="color:${r.customer==='Nexus'?'var(--accent)':'var(--text2)'};font-weight:${r.customer==='Nexus'?'bold':'normal'}">${r.customer||'—'}</td>
@@ -3061,9 +3132,10 @@ function applyInvFilter(field, value) {
       <td style="color:var(--text2)">${r.skid||'—'}</td>
       <td>${r.location}</td>
       <td style="color:var(--text2)">${r.expDate?r.expDate.toLocaleDateString():'—'}</td>
+      <td style="color:${r.dateRecd?'var(--text2)':'var(--warning)'}">${r.dateRecd?r.dateRecd.toLocaleDateString():'—'}</td>
       <td style="color:var(--text2)">${r.grossWt||'—'}</td>
       <td style="color:var(--text2)">${r.bol||'—'}</td>
-    </tr>`).join('') : '<tr><td colspan="13" style="text-align:center;color:var(--text2);padding:20px">No records match</td></tr>') +
+    </tr>`).join('') : '<tr><td colspan="14" style="text-align:center;color:var(--text2);padding:20px">No records match</td></tr>') +
     `</tbody></table>`;
 }
 
@@ -5849,7 +5921,7 @@ function showDataPreview() {
         <table class="sku-table" style="font-size:11px"><thead><tr>
           <th>CUSTOMER</th><th>SKU</th><th>NAME</th><th>PO #</th><th>PCS</th><th>PCS PENDING</th>
           <th>STATUS</th><th>LOT #</th><th>SKID ID</th><th>LOCATION</th>
-          <th>EXP DATE</th><th>GROSS WT</th><th>INBOUND BOL</th>
+          <th>EXP DATE</th><th>DATE REC'D</th><th>GROSS WT</th><th>INBOUND BOL</th>
         </tr></thead><tbody>`+
         (sl.length ? sl.map(r=>`<tr>
           <td style="color:${r.customer==='Nexus'?'var(--accent)':'var(--text2)'};font-weight:${r.customer==='Nexus'?'bold':'normal'}">${r.customer||'—'}</td>
@@ -5863,9 +5935,10 @@ function showDataPreview() {
           <td style="color:var(--text2)">${r.skid||'—'}</td>
           <td>${r.location}</td>
           <td style="color:var(--text2)">${r.expDate?r.expDate.toLocaleDateString():'—'}</td>
+          <td style="color:${r.dateRecd?'var(--text2)':'var(--warning)'}">${r.dateRecd?r.dateRecd.toLocaleDateString():'—'}</td>
           <td style="color:var(--text2)">${r.grossWt||'—'}</td>
           <td style="color:var(--text2)">${r.bol||'—'}</td>
-        </tr>`).join('') : '<tr><td colspan="13" style="text-align:center;color:var(--text2);padding:20px">No records match the filter</td></tr>')+
+        </tr>`).join('') : '<tr><td colspan="14" style="text-align:center;color:var(--text2);padding:20px">No records match the filter</td></tr>')+
         `</tbody></table></div>`;
     } else if (tab==='helper') {
       const ps=50, st=page*ps, sl=state.helper.slice(st,st+ps), tot=state.helper.length, pg=Math.ceil(tot/ps);
