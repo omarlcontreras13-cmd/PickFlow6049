@@ -330,16 +330,21 @@ function syncInventoryToFirebase() {
 // ─── AUTO-UPDATE ───────────────────────────────────────────
 // Publishes this build to Firebase; when a newer build is published elsewhere, open
 // clients hard-reload to pick it up (like the Dock Scheduler). BUMP APP_BUILD EVERY RELEASE.
-const APP_BUILD = 75;
+const APP_BUILD = 77;
 const VERSION_PATH = 'appVersion';
+// A downloaded copy opened as a local file (file://) is a TEST build. The LIVE app is served
+// over http(s). A test build NEVER publishes its version or auto-reloads, so opening it to
+// try changes can't bump the shared version and restart the live app your staff are using.
+const IS_TEST_BUILD = (function(){ try{ return location.protocol === 'file:'; }catch(e){ return false; } })();
 function _versionDoReload(remote){
   const a=document.activeElement;
   if(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)){ setTimeout(function(){ _versionDoReload(remote); }, 4000); return; }  // don't interrupt data entry
   try{ location.reload(true); }catch(e){ location.reload(); }
 }
 function _versionGuard(){
-  try{ const el=document.getElementById('app-version'); if(el) el.textContent='v'+APP_BUILD; }catch(e){}
+  try{ const el=document.getElementById('app-version'); if(el) el.textContent='v'+APP_BUILD+(IS_TEST_BUILD?' TEST':''); }catch(e){}
   if(!db) return;
+  if(IS_TEST_BUILD) return;   // test copy (file://): don't publish version or auto-reload — live app untouched
   db.ref(VERSION_PATH).on('value', function(snap){
     const remote = parseInt(snap.val(),10) || 0;
     if(remote > APP_BUILD){
@@ -3351,7 +3356,7 @@ function showCycleCountStart() {
     });
     const binAcc = totalLines>0 ? Math.round(accurateLines/totalLines*100) : null;
     const cntAcc = totalAdjExp>0 ? Math.max(0,Math.round((1-(totalAdjAdd+totalAdjMiss)/totalAdjExp)*100)) : null;
-    const invAcc = inventoryAccuracyStats(true).pct;
+    const invAcc = inventoryAccuracyStats().pct;
 
     let html = `
     <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">
@@ -3743,7 +3748,7 @@ function showCCTracker() {
     const pct = storageLocs.length > 0 ? Math.round(countedLocs.length/storageLocs.length*100) : 0;
     const pctColor = pct>=100?'var(--accent2)':pct>=50?'var(--warning)':'var(--danger)';
     const wdColor  = remainWorkDays<=3?'var(--danger)':remainWorkDays<=7?'var(--warning)':'var(--accent2)';
-    const invAcc   = inventoryAccuracyStats(true).pct;
+    const invAcc   = inventoryAccuracyStats().pct;
     const invAccColor = invAcc===null?'var(--text2)':invAcc>=98?'var(--accent2)':invAcc>=95?'var(--warning)':'var(--danger)';
 
     // Build calendar day headers
@@ -3866,19 +3871,19 @@ function exportCCTrackerReport() {
     const adjs   = s.adjustments || [];
     const getAdj = loc => adjs.find(a => a.loc === loc);
     const entries = s.entries || [];
-    let exp = 0, adjTot = 0, net = 0;
-    entries.forEach(e => {
-      const a = getAdj(e.loc);
+    let exp = 0;
+    entries.forEach(e => { exp += e.expectedPlt || 0; });   // expected units: summed per SKU line
+    // Adjustments are per LOCATION — count each location's variance ONCE (not once per SKU
+    // line), matching the on-screen summary. Looping entries here double-counted multi-SKU bins.
+    const nonEmpty = [...new Set(entries.filter(e => !e.empty && e.sku).map(e => e.loc))];
+    let adjTot = 0, net = 0, accurate = 0;
+    nonEmpty.forEach(loc => {
+      const a = getAdj(loc);
       const add = a ? (a.adjAdd||0) : 0, miss = a ? (a.adjMiss||0) : 0;
-      exp    += e.expectedPlt || 0;
       adjTot += add + miss;
       net    += add - miss;
+      if (add === 0 && miss === 0) accurate++;
     });
-    const nonEmpty = [...new Set(entries.filter(e => !e.empty && e.sku).map(e => e.loc))];
-    const accurate = nonEmpty.filter(loc => {
-      const a = getAdj(loc);
-      return !a || ((a.adjAdd||0) === 0 && (a.adjMiss||0) === 0);
-    }).length;
     const binPct   = nonEmpty.length > 0 ? (accurate / nonEmpty.length * 100) : 100;
     const countPct = exp > 0 ? Math.max(0, (1 - adjTot/exp) * 100) : 100;
     const locs     = (s.locations || []).length;
